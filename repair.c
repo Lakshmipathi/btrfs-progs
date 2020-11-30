@@ -16,9 +16,9 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#include "ctree.h"
-#include "extent-cache.h"
-#include "utils.h"
+#include "kernel-shared/ctree.h"
+#include "common/extent-cache.h"
+#include "common/utils.h"
 #include "repair.h"
 
 int repair = 0;

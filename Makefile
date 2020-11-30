@@ -1,11 +1,20 @@
 #
 # Basic build targets:
 #   all		all main tools and the shared library
-#   static      build static bnaries, requires static version of the libraries
+#   static      build static binaries, requires static version of the libraries
 #   test        run the full testsuite
-#   install     install to default location (/usr/local)
+#   install     install binaries, shared libraries and header files to default
+#               location (/usr/local)
+#   install-static
+#               install the static binaries, static libraries and header files
+#               to default locationh (/usr/local)
 #   clean       clean built binaries (not the documentation)
 #   clean-all   clean as above, clean docs and generated files
+#
+# All-in-one binary (busybox style):
+#   btrfs.box         single binary with functionality of mkfs.btrfs, btrfs-image,
+#                     btrfs-convert and btrfstune, selected by the file name
+#   btrfs.box.static  dtto, static version
 #
 # Tuning by variables (environment or make arguments):
 #   V=1            verbose, print command lines (default: quiet)
@@ -24,6 +33,10 @@
 #   DEBUG_CFLAGS   additional compiler flags for debugging build
 #   EXTRA_CFLAGS   additional compiler flags
 #   EXTRA_LDFLAGS  additional linker flags
+#   EXTRA_PYTHON_CFLAGS   additional compiler flags to pass when building Python
+#                         library
+#   EXTRA_PYTHON_LDFLAGS  additional linker flags to pass when building Python
+#                         library
 #
 # Testing-specific options (see also tests/README.md):
 #   TEST=GLOB      run test(s) from directories matching GLOB
@@ -44,6 +57,7 @@ $(error Makefile.inc not generated, please configure first)
 endif
 
 TAGS_CMD := ctags
+ETAGS_CMD := etags
 CSCOPE_CMD := cscope -u -b -c -q
 
 include Makefile.extrawarn
@@ -62,6 +76,15 @@ DEBUG_LDFLAGS :=
 ABSTOPDIR = $(shell pwd)
 TOPDIR := .
 
+# Disable certain GCC 8 + glibc 2.28 warning for snprintf()
+# where string truncation for snprintf() is expected.
+# For GCC9 disable address-of-packed (under W=1)
+DISABLE_WARNING_FLAGS := $(call cc-disable-warning, format-truncation) \
+	$(call cc-disable-warning, address-of-packed-member)
+
+# Warnings that we want by default
+ENABLE_WARNING_FLAGS := $(call cc-option, -Wimplicit-fallthrough)
+
 # Common build flags
 CFLAGS = $(SUBST_CFLAGS) \
 	 $(CSTD) \
@@ -71,8 +94,10 @@ CFLAGS = $(SUBST_CFLAGS) \
 	 -fno-strict-aliasing \
 	 -fPIC \
 	 -I$(TOPDIR) \
-	 -I$(TOPDIR)/kernel-lib \
 	 -I$(TOPDIR)/libbtrfsutil \
+	 $(CRYPTO_CFLAGS) \
+	 $(DISABLE_WARNING_FLAGS) \
+	 $(ENABLE_WARNING_FLAGS) \
 	 $(EXTRAWARN_CFLAGS) \
 	 $(DEBUG_CFLAGS_INTERNAL) \
 	 $(EXTRA_CFLAGS)
@@ -92,8 +117,16 @@ LDFLAGS = $(SUBST_LDFLAGS) \
 	  $(DEBUG_LDFLAGS_INTERNAL) \
 	  $(EXTRA_LDFLAGS)
 
-LIBS = $(LIBS_BASE)
-LIBBTRFS_LIBS = $(LIBS_BASE)
+LIBBTRFSUTIL_LDFLAGS = $(SUBST_LDFLAGS) \
+		       -rdynamic -L$(TOPDIR) \
+		       $(DEBUG_LDFLAGS_INTERNAL) \
+		       $(EXTRA_LDFLAGS)
+
+# Default implementation
+CRYPTO_OBJECTS =
+
+LIBS = $(LIBS_BASE) $(LIBS_CRYPTO)
+LIBBTRFS_LIBS = $(LIBS_BASE) $(LIBS_CRYPTO)
 
 # Static compilation flags
 STATIC_CFLAGS = $(CFLAGS) -ffunction-sections -fdata-sections
@@ -110,27 +143,42 @@ CHECKER_FLAGS := -include $(check_defs) -D__CHECKER__ \
 	-D__CHECK_ENDIAN__ -Wbitwise -Wuninitialized -Wshadow -Wundef \
 	-U_FORTIFY_SOURCE -Wdeclaration-after-statement -Wdefault-bitfield-sign
 
-objects = ctree.o disk-io.o kernel-lib/radix-tree.o extent-tree.o print-tree.o \
-	  root-tree.o dir-item.o file-item.o inode-item.o inode-map.o \
-	  extent-cache.o extent_io.o volumes.o utils.o repair.o \
-	  qgroup.o free-space-cache.o kernel-lib/list_sort.o props.o \
-	  kernel-shared/ulist.o qgroup-verify.o backref.o string-table.o task-utils.o \
-	  inode.o file.o find-root.o free-space-tree.o help.o send-dump.o \
-	  fsfeatures.o kernel-lib/tables.o kernel-lib/raid56.o transaction.o
-cmds_objects = cmds-subvolume.o cmds-filesystem.o cmds-device.o cmds-scrub.o \
-	       cmds-inspect.o cmds-balance.o cmds-send.o cmds-receive.o \
-	       cmds-quota.o cmds-qgroup.o cmds-replace.o check/main.o \
-	       cmds-restore.o cmds-rescue.o chunk-recover.o super-recover.o \
-	       cmds-property.o cmds-fi-usage.o cmds-inspect-dump-tree.o \
-	       cmds-inspect-dump-super.o cmds-inspect-tree-stats.o cmds-fi-du.o \
+objects = kernel-shared/dir-item.o \
+	  qgroup.o kernel-lib/list_sort.o props.o \
+	  kernel-shared/ulist.o check/qgroup-verify.o kernel-shared/backref.o \
+	  common/string-table.o common/task-utils.o \
+	  kernel-shared/inode.o kernel-shared/file.o common/help.o cmds/receive-dump.o \
+	  common/fsfeatures.o \
+	  common/format-output.o \
+	  common/device-utils.o
+cmds_objects = cmds/subvolume.o cmds/filesystem.o cmds/device.o cmds/scrub.o \
+	       cmds/inspect.o cmds/balance.o cmds/send.o cmds/receive.o \
+	       cmds/quota.o cmds/qgroup.o cmds/replace.o check/main.o \
+	       cmds/restore.o cmds/rescue.o cmds/rescue-chunk-recover.o \
+	       cmds/rescue-super-recover.o \
+	       cmds/property.o cmds/filesystem-usage.o cmds/inspect-dump-tree.o \
+	       cmds/inspect-dump-super.o cmds/inspect-tree-stats.o cmds/filesystem-du.o \
 	       mkfs/common.o check/mode-common.o check/mode-lowmem.o
-libbtrfs_objects = send-stream.o send-utils.o kernel-lib/rbtree.o btrfs-list.o \
-		   kernel-lib/crc32c.o messages.o \
-		   uuid-tree.o utils-lib.o rbtree-utils.o
-libbtrfs_headers = send-stream.h send-utils.h send.h kernel-lib/rbtree.h btrfs-list.h \
-	       kernel-lib/crc32c.h kernel-lib/list.h kerncompat.h \
+libbtrfs_objects = common/send-stream.o common/send-utils.o kernel-lib/rbtree.o btrfs-list.o \
+		   kernel-lib/radix-tree.o common/extent-cache.o kernel-shared/extent_io.o \
+		   crypto/crc32c.o common/messages.o \
+		   kernel-shared/uuid-tree.o common/utils-lib.o common/rbtree-utils.o \
+		   kernel-shared/ctree.o kernel-shared/disk-io.o \
+		   kernel-shared/extent-tree.o kernel-shared/delayed-ref.o \
+		   kernel-shared/print-tree.o \
+		   kernel-shared/free-space-cache.o kernel-shared/root-tree.o \
+		   kernel-shared/volumes.o kernel-shared/transaction.o \
+		   kernel-shared/free-space-tree.o repair.o kernel-shared/inode-item.o \
+		   kernel-shared/file-item.o \
+		   kernel-lib/raid56.o kernel-lib/tables.o \
+		   common/device-scan.o common/path-utils.o \
+		   common/utils.o libbtrfsutil/subvolume.o libbtrfsutil/stubs.o \
+		   crypto/hash.o crypto/xxhash.o $(CRYPTO_OBJECTS)
+libbtrfs_headers = common/send-stream.h common/send-utils.h send.h kernel-lib/rbtree.h btrfs-list.h \
+	       crypto/crc32c.h kernel-lib/list.h kerncompat.h \
 	       kernel-lib/radix-tree.h kernel-lib/sizes.h kernel-lib/raid56.h \
-	       extent-cache.h extent_io.h ioctl.h ctree.h btrfsck.h version.h
+	       common/extent-cache.h kernel-shared/extent_io.h ioctl.h \
+	       kernel-shared/ctree.h btrfsck.h version.h
 libbtrfsutil_major := $(shell sed -rn 's/^\#define BTRFS_UTIL_VERSION_MAJOR ([0-9])+$$/\1/p' libbtrfsutil/btrfsutil.h)
 libbtrfsutil_minor := $(shell sed -rn 's/^\#define BTRFS_UTIL_VERSION_MINOR ([0-9])+$$/\1/p' libbtrfsutil/btrfsutil.h)
 libbtrfsutil_patch := $(shell sed -rn 's/^\#define BTRFS_UTIL_VERSION_PATCH ([0-9])+$$/\1/p' libbtrfsutil/btrfsutil.h)
@@ -206,21 +254,42 @@ endif
 
 MAKEOPTS = --no-print-directory Q=$(Q)
 
-# build all by default
-progs = $(progs_install) btrfsck btrfs-corrupt-block
+# built-in sources into "busybox", all files that contain the main function and
+# are not compiled standalone
+progs_box_main = btrfs.o mkfs/main.o image/main.o convert/main.o \
+		 btrfstune.o
 
-# install only selected
+progs_box_all_objects = $(mkfs_objects) $(image_objects) $(convert_objects)
+progs_box_all_static_objects = $(static_mkfs_objects) $(static_image_objects) \
+			       $(static_convert_objects)
+
+progs_box_objects = $(filter-out %/main.o, $(progs_box_all_objects)) \
+		    $(patsubst %.o, %.box.o, $(progs_box_main))
+progs_box_static_objects = $(filter-out %/main.static.o, $(progs_box_all_static_objects)) \
+		    $(patsubst %.o, %.box.static.o, $(progs_box_main))
+
+# Programs to install.
 progs_install = btrfs mkfs.btrfs btrfs-map-logical btrfs-image \
-	btrfs-find-root btrfstune \
-	btrfs-select-super
+		btrfs-find-root btrfstune btrfs-select-super
 
-# other tools, not built by default
-progs_extra = btrfs-fragments
+# Programs to build.
+progs_build = $(progs_install) btrfsck btrfs-corrupt-block
 
-progs_static = $(foreach p,$(progs),$(p).static)
+# All programs. Use := instead of = so that this is expanded before we reassign
+# progs_build below.
+progs := $(progs_build) btrfs-convert btrfs-fragments
 
 ifneq ($(DISABLE_BTRFSCONVERT),1)
 progs_install += btrfs-convert
+endif
+
+# Static programs to build. Use := instead of = because `make static` should
+# still build everything even if --disable-programs was passed to ./configure.
+progs_static := $(foreach p,$(progs_build),$(p).static)
+
+ifneq ($(BUILD_PROGRAMS),1)
+progs_install =
+progs_build =
 endif
 
 # external libs required by various binaries; for btrfs-foo,
@@ -230,10 +299,15 @@ btrfs_convert_cflags += -DBTRFSCONVERT_REISERFS=$(BTRFSCONVERT_REISERFS)
 btrfs_fragments_libs = -lgd -lpng -ljpeg -lfreetype
 cmds_restore_cflags = -DBTRFSRESTORE_ZSTD=$(BTRFSRESTORE_ZSTD)
 
+ifeq ($(CRYPTOPROVIDER_BUILTIN),1)
+CRYPTO_OBJECTS = crypto/sha224-256.o crypto/blake2b-ref.o
+CRYPTO_CFLAGS = -DCRYPTOPROVIDER_BUILTIN=1
+endif
+
 CHECKER_FLAGS += $(btrfs_convert_cflags)
 
 # collect values of the variables above
-standalone_deps = $(foreach dep,$(patsubst %,%_objects,$(subst -,_,$(filter btrfs-%, $(progs) $(progs_extra)))),$($(dep)))
+standalone_deps = $(foreach dep,$(patsubst %,%_objects,$(subst -,_,$(filter btrfs-%, $(progs)))),$($(dep)))
 
 SUBDIRS =
 BUILDDIRS = $(patsubst %,build-%,$(SUBDIRS))
@@ -266,6 +340,13 @@ libs_shared = libbtrfs.so.0.1 libbtrfsutil.so.$(libbtrfsutil_version)
 libs_static = libbtrfs.a libbtrfsutil.a
 libs = $(libs_shared) $(libs_static)
 lib_links = libbtrfs.so.0 libbtrfs.so libbtrfsutil.so.$(libbtrfsutil_major) libbtrfsutil.so
+libs_build =
+ifeq ($(BUILD_SHARED_LIBRARIES),1)
+libs_build += $(libs_shared) $(lib_links)
+endif
+ifeq ($(BUILD_STATIC_LIBRARIES),1)
+libs_build += $(libs_static)
+endif
 
 # make C=1 to enable sparse
 ifdef C
@@ -294,15 +375,23 @@ endif
 	@$(check_echo) "    [SP]     $<"
 	$(Q)$(check) $(CFLAGS) $(CHECKER_FLAGS) $<
 	@echo "    [CC]     $@"
-	$(Q)$(CC) $(CFLAGS) -c $< -o $@ $($(subst -,_,$(@:%.o=%)-cflags)) \
+	$(Q)$(CC) $(CFLAGS) -c $< -o $@ $($(subst /,_,$(subst -,_,$(@:%.o=%)-cflags))) \
 		$($(subst -,_,btrfs-$(@:%/$(notdir $@)=%)-cflags))
 
 %.static.o: %.c
 	@echo "    [CC]     $@"
-	$(Q)$(CC) $(STATIC_CFLAGS) -c $< -o $@ $($(subst -,_,$(@:%.static.o=%)-cflags)) \
+	$(Q)$(CC) $(STATIC_CFLAGS) -c $< -o $@ $($(subst /,_,$(subst -,_,$(@:%.static.o=%)-cflags))) \
 		$($(subst -,_,btrfs-$(@:%/$(notdir $@)=%)-cflags))
 
-all: $(progs) $(libs) $(lib_links) $(BUILDDIRS)
+%.box.o: %.c
+	@echo "    [CC]     $@"
+	$(Q)$(CC) -DENABLE_BOX=1 $(CFLAGS) $(btrfs_convert_cflags) -c $< -o $@
+
+%.box.static.o: %.c
+	@echo "    [CC]     $@"
+	$(Q)$(CC) -DENABLE_BOX=1 $(STATIC_CFLAGS) $(btrfs_convert_cflags) -c $< -o $@
+
+all: $(progs_build) $(libs_build) $(BUILDDIRS)
 ifeq ($(PYTHON_BINDINGS),1)
 all: libbtrfsutil_python
 endif
@@ -316,9 +405,15 @@ test-convert: btrfs btrfs-convert
 	$(Q)bash tests/convert-tests.sh
 
 test-check: test-fsck
+test-check-lowmem: test-fsck
 test-fsck: btrfs btrfs-image btrfs-corrupt-block mkfs.btrfs btrfstune
+ifneq ($(MAKECMDGOALS),test-check-lowmem)
 	@echo "    [TEST]   fsck-tests.sh"
 	$(Q)bash tests/fsck-tests.sh
+else
+	@echo "    [TEST]   fsck-tests.sh (mode=lowmem)"
+	$(Q)TEST_ENABLE_OVERRIDE=true TEST_ARGS_CHECK=--mode=lowmem bash tests/fsck-tests.sh
+endif
 
 test-misc: btrfs btrfs-image btrfs-corrupt-block mkfs.btrfs btrfstune fssum \
 		btrfs-find-root btrfs-select-super btrfs-convert
@@ -347,9 +442,9 @@ test-inst: all
 		$(MAKE) $(MAKEOPTS) DESTDIR=$$tmpdest install && \
 		$(RM) -rf -- $$tmpdest
 
-test: test-fsck test-mkfs test-misc test-cli test-convert test-fuzz
+test: test-check test-check-lowmem test-mkfs test-misc test-cli test-convert test-fuzz
 
-testsuite: btrfs-corrupt-block fssum
+testsuite: btrfs-corrupt-block btrfs-find-root btrfs-select-super fssum
 	@echo "Export tests as a package"
 	$(Q)cd tests && ./export-testsuite.sh
 
@@ -367,7 +462,7 @@ endif
 # NOTE: For static compiles, you need to have all the required libs
 # 	static equivalent available
 #
-static: $(progs_static)
+static: $(progs_static) $(libs_static)
 
 version.h: version.h.in configure.ac
 	@echo "    [SH]     $@"
@@ -383,16 +478,16 @@ kernel-lib/tables.c:
 	@echo "    [TABLE]  $@"
 	$(Q)./mktables > $@ || ($(RM) -f $@ && exit 1)
 
-libbtrfs.so.0.1: $(libbtrfs_objects)
+libbtrfs.so.0.1: $(libbtrfs_objects) libbtrfs.sym
 	@echo "    [LD]     $@"
-	$(Q)$(CC) $(CFLAGS) $^ $(LDFLAGS) $(LIBBTRFS_LIBS) \
-		-shared -Wl,-soname,libbtrfs.so.0 -o $@
+	$(Q)$(CC) $(CFLAGS) $(filter %.o,$^) $(LDFLAGS) $(LIBBTRFS_LIBS) \
+		-shared -Wl,-soname,libbtrfs.so.0 -Wl,--version-script=libbtrfs.sym -o $@
 
 libbtrfs.a: $(libbtrfs_objects)
 	@echo "    [AR]     $@"
 	$(Q)$(AR) cr $@ $^
 
-libbtrfs.so.0 libbtrfs.so: libbtrfs.so.0.1
+libbtrfs.so.0 libbtrfs.so: libbtrfs.so.0.1 libbtrfs.sym
 	@echo "    [LN]     $@"
 	$(Q)$(LN_S) -f $< $@
 
@@ -400,10 +495,11 @@ libbtrfsutil/%.o: libbtrfsutil/%.c
 	@echo "    [CC]     $@"
 	$(Q)$(CC) $(LIBBTRFSUTIL_CFLAGS) -o $@ -c $< -o $@
 
-libbtrfsutil.so.$(libbtrfsutil_version): $(libbtrfsutil_objects)
+libbtrfsutil.so.$(libbtrfsutil_version): $(libbtrfsutil_objects) libbtrfsutil.sym
 	@echo "    [LD]     $@"
-	$(Q)$(CC) $(LIBBTRFSUTIL_CFLAGS) $(libbtrfsutil_objects) \
-		-shared -Wl,-soname,libbtrfsutil.so.$(libbtrfsutil_major) -o $@
+	$(Q)$(CC) $(LIBBTRFSUTIL_CFLAGS) $(libbtrfsutil_objects) $(LIBBTRFSUTIL_LDFLAGS) \
+		-shared -Wl,-soname,libbtrfsutil.so.$(libbtrfsutil_major) \
+		-Wl,--version-script=libbtrfsutil.sym -o $@
 
 libbtrfsutil.a: $(libbtrfsutil_objects)
 	@echo "    [AR]     $@"
@@ -417,7 +513,7 @@ ifeq ($(PYTHON_BINDINGS),1)
 libbtrfsutil_python: libbtrfsutil.so.$(libbtrfsutil_major) libbtrfsutil.so libbtrfsutil/btrfsutil.h
 	@echo "    [PY]     libbtrfsutil"
 	$(Q)cd libbtrfsutil/python; \
-		CFLAGS= LDFLAGS= $(PYTHON) setup.py $(SETUP_PY_Q) build_ext -i build
+		CFLAGS="$(EXTRA_PYTHON_CFLAGS)" LDFLAGS="$(EXTRA_PYTHON_LDFLAGS)" $(PYTHON) setup.py $(SETUP_PY_Q) build_ext -i build
 
 .PHONY: libbtrfsutil_python
 endif
@@ -453,6 +549,25 @@ btrfs: btrfs.o $(objects) $(cmds_objects) $(libs_static)
 btrfs.static: btrfs.static.o $(static_objects) $(static_cmds_objects) $(static_libbtrfs_objects) $(static_libbtrfsutil_objects)
 	@echo "    [LD]     $@"
 	$(Q)$(CC) -o $@ $^ $(STATIC_LDFLAGS) $(STATIC_LIBS) $(STATIC_LIBS_COMP)
+
+btrfs.box: btrfs.box.o $(objects) $(cmds_objects) $(progs_box_objects) $(libs_static)
+	@echo "    [LD]     $@"
+	$(Q)$(CC) -o $@ $^ $(btrfs_convert_libs) $(LDFLAGS) $(LIBS) $(LIBS_COMP)
+
+btrfs.box.static: btrfs.box.static.o $(static_objects) $(static_cmds_objects) $(progs_box_static_objects) $(static_libbtrfs_objects) $(static_libbtrfsutil_objects)
+	@echo "    [LD]     $@"
+	$(Q)$(CC) $(STATIC_CFLAGS) -o $@ $^ $(btrfs_convert_libs) \
+		$(STATIC_LDFLAGS) $(STATIC_LIBS) $(STATIC_LIBS_COMP)
+
+box-links: btrfs.box
+	@echo "    [LN]     mkfs.btrfs"
+	$(Q)$(LN_S) -sf btrfs.box mkfs.btrfs
+	@echo "    [LN]     btrfs-image"
+	$(Q)$(LN_S) -sf btrfs.box btrfs-image
+	@echo "    [LN]     btrfs-convert"
+	$(Q)$(LN_S) -sf btrfs.box btrfs-convert
+	@echo "    [LN]     btrfstune"
+	$(Q)$(LN_S) -sf btrfs.box btrfstune
 
 # For backward compatibility, 'btrfs' changes behaviour to fsck if it's named 'btrfsck'
 btrfsck: btrfs
@@ -495,23 +610,19 @@ btrfs-convert.static: $(static_convert_objects) $(static_objects) $(static_libbt
 	@echo "    [LD]     $@"
 	$(Q)$(CC) -o $@ $^ $(STATIC_LDFLAGS) $(btrfs_convert_libs) $(STATIC_LIBS)
 
-dir-test: dir-test.o $(objects) $(libs)
-	@echo "    [LD]     $@"
-	$(Q)$(CC) -o $@ $^ $(LDFLAGS) $(LIBS)
-
 quick-test: quick-test.o $(objects) $(libs)
 	@echo "    [LD]     $@"
 	$(Q)$(CC) -o $@ $^ $(LDFLAGS) $(LIBS)
 
-ioctl-test.o: ioctl-test.c ioctl.h kerncompat.h ctree.h
+ioctl-test.o: tests/ioctl-test.c ioctl.h kerncompat.h kernel-shared/ctree.h
 	@echo "    [CC]   $@"
 	$(Q)$(CC) $(CFLAGS) -c $< -o $@
 
-ioctl-test-32.o: ioctl-test.c ioctl.h kerncompat.h ctree.h
+ioctl-test-32.o: tests/ioctl-test.c ioctl.h kerncompat.h kernel-shared/ctree.h
 	@echo "    [CC32]   $@"
 	$(Q)$(CC) $(CFLAGS) -m32 -c $< -o $@
 
-ioctl-test-64.o: ioctl-test.c ioctl.h kerncompat.h ctree.h
+ioctl-test-64.o: tests/ioctl-test.c ioctl.h kerncompat.h kernel-shared/ctree.h
 	@echo "    [CC64]   $@"
 	$(Q)$(CC) $(CFLAGS) -m64 -c $< -o $@
 
@@ -539,17 +650,18 @@ test-ioctl: ioctl-test ioctl-test-32 ioctl-test-64
 	$(Q)./ioctl-test-32 > ioctl-test-32.log
 	$(Q)./ioctl-test-64 > ioctl-test-64.log
 
-library-test: library-test.c libbtrfs.so
+library-test: tests/library-test.c libbtrfs.so
 	@echo "    [TEST PREP]  $@"$(eval TMPD=$(shell mktemp -d))
 	$(Q)mkdir -p $(TMPD)/include/btrfs && \
 	cp $(libbtrfs_headers) $(TMPD)/include/btrfs && \
+	cp libbtrfs.so.0.1 $(TMPD) && \
 	cd $(TMPD) && $(CC) -I$(TMPD)/include -o $@ $(addprefix $(ABSTOPDIR)/,$^) -Wl,-rpath=$(ABSTOPDIR) -lbtrfs
 	@echo "    [TEST RUN]   $@"
-	$(Q)cd $(TMPD) && ./$@
+	$(Q)cd $(TMPD) && LD_PRELOAD=libbtrfs.so.0.1 ./$@
 	@echo "    [TEST CLEAN] $@"
 	$(Q)$(RM) -rf -- $(TMPD)
 
-library-test.static: library-test.c $(libs_static)
+library-test.static: tests/library-test.c $(libs_static)
 	@echo "    [TEST PREP]  $@"$(eval TMPD=$(shell mktemp -d))
 	$(Q)mkdir -p $(TMPD)/include/btrfs && \
 	cp $(libbtrfs_headers) $(TMPD)/include/btrfs && \
@@ -559,9 +671,13 @@ library-test.static: library-test.c $(libs_static)
 	@echo "    [TEST CLEAN] $@"
 	$(Q)$(RM) -rf -- $(TMPD)
 
-fssum: tests/fssum.c tests/sha224-256.c
+fssum: tests/fssum.c crypto/sha224-256.c
 	@echo "    [LD]     $@"
 	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+hash-speedtest: crypto/hash-speedtest.c $(objects) $(libs_static)
+	@echo "    [LD]     $@"
+	$(Q)$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 test-build: test-build-pre test-build-real
 
@@ -573,9 +689,8 @@ test-build-pre:
 test-build-real:
 	$(MAKE) $(MAKEOPTS) library-test
 	-$(MAKE) $(MAKEOPTS) library-test.static
-	$(MAKE) $(MAKEOPTS) -j 8 all
+	$(MAKE) $(MAKEOPTS) -j 8 $(progs) $(libs) $(lib_links) $(BUILDDIRS)
 	-$(MAKE) $(MAKEOPTS) -j 8 static
-	$(MAKE) $(MAKEOPTS) -j 8 $(progs_extra)
 
 manpages:
 	$(Q)$(MAKE) $(MAKEOPTS) -C Documentation
@@ -584,12 +699,21 @@ tags: FORCE
 	@echo "    [TAGS]   $(TAGS_CMD)"
 	$(Q)$(TAGS_CMD) *.[ch] image/*.[ch] convert/*.[ch] mkfs/*.[ch] \
 		check/*.[ch] kernel-lib/*.[ch] kernel-shared/*.[ch] \
+		cmds/*.[ch] common/*.[ch] \
+		libbtrfsutil/*.[ch]
+
+etags: FORCE
+	@echo "    [ETAGS]   $(ETAGS_CMD)"
+	$(Q)$(ETAGS_CMD) *.[ch] image/*.[ch] convert/*.[ch] mkfs/*.[ch] \
+		check/*.[ch] kernel-lib/*.[ch] kernel-shared/*.[ch] \
+		cmds/*.[ch] common/*.[ch] \
 		libbtrfsutil/*.[ch]
 
 cscope: FORCE
 	@echo "    [CSCOPE] $(CSCOPE_CMD)"
 	$(Q)ls -1 *.[ch] image/*.[ch] convert/*.[ch] mkfs/*.[ch] check/*.[ch] \
 		kernel-lib/*.[ch] kernel-shared/*.[ch] libbtrfsutil/*.[ch] \
+		cmds/*.[ch] common/*.[ch] \
 		> cscope.files
 	$(Q)$(CSCOPE_CMD)
 
@@ -603,11 +727,14 @@ clean: $(CLEANDIRS)
 		image/*.o image/*.o.d \
 		convert/*.o convert/*.o.d \
 		mkfs/*.o mkfs/*.o.d check/*.o check/*.o.d \
-	      dir-test ioctl-test quick-test library-test library-test-static \
+		cmds/*.o cmds/*.o.d common/*.o common/*.o.d \
+		crypto/*.o crypto/*.o.d \
+	      ioctl-test quick-test library-test library-test-static \
               mktables btrfs.static mkfs.btrfs.static fssum \
+	      btrfs.box btrfs.box.static \
 	      $(check_defs) \
 	      $(libs) $(lib_links) \
-	      $(progs_static) $(progs_extra) \
+	      $(progs_static) \
 	      libbtrfsutil/*.o libbtrfsutil/*.o.d
 ifeq ($(PYTHON_BINDINGS),1)
 	$(Q)cd libbtrfsutil/python; \
@@ -620,9 +747,9 @@ clean-doc:
 
 clean-gen:
 	@echo "Cleaning Generated Files"
-	$(Q)$(RM) -rf -- version.h config.status config.cache connfig.log \
+	$(Q)$(RM) -rf -- version.h config.status config.cache config.log \
 		configure.lineno config.status.lineno Makefile.inc \
-		Documentation/Makefile tags \
+		Documentation/Makefile tags TAGS \
 		cscope.files cscope.out cscope.in.out cscope.po.out \
 		config.log config.h config.h.in~ aclocal.m4 \
 		configure autom4te.cache/ config/
@@ -631,21 +758,29 @@ $(CLEANDIRS):
 	@echo "Cleaning $(patsubst clean-%,%,$@)"
 	$(Q)$(MAKE) $(MAKEOPTS) -C $(patsubst clean-%,%,$@) clean
 
-install: $(libs) $(progs_install) $(INSTALLDIRS)
+install: $(libs_build) $(progs_install) $(INSTALLDIRS)
+ifeq ($(BUILD_PROGRAMS),1)
 	$(INSTALL) -m755 -d $(DESTDIR)$(bindir)
 	$(INSTALL) $(progs_install) $(DESTDIR)$(bindir)
 	$(INSTALL) fsck.btrfs $(DESTDIR)$(bindir)
 	# btrfsck is a link to btrfs in the src tree, make it so for installed file as well
 	$(LN_S) -f btrfs $(DESTDIR)$(bindir)/btrfsck
-	$(INSTALL) -m755 -d $(DESTDIR)$(libdir)
-	$(INSTALL) $(libs) $(DESTDIR)$(libdir)
-	cp -d $(lib_links) $(DESTDIR)$(libdir)
-	$(INSTALL) -m755 -d $(DESTDIR)$(incdir)/btrfs
-	$(INSTALL) -m644 $(libbtrfs_headers) $(DESTDIR)$(incdir)/btrfs
-	$(INSTALL) -m644 libbtrfsutil/btrfsutil.h $(DESTDIR)$(incdir)
 ifneq ($(udevdir),)
 	$(INSTALL) -m755 -d $(DESTDIR)$(udevruledir)
 	$(INSTALL) -m644 $(udev_rules) $(DESTDIR)$(udevruledir)
+endif
+endif
+ifneq ($(libs_build),)
+	$(INSTALL) -m755 -d $(DESTDIR)$(libdir)
+	$(INSTALL) $(libs_build) $(DESTDIR)$(libdir)
+ifeq ($(BUILD_SHARED_LIBRARIES),1)
+	cp -d $(lib_links) $(DESTDIR)$(libdir)
+endif
+	$(INSTALL) -m755 -d $(DESTDIR)$(incdir)/btrfs
+	$(INSTALL) -m644 $(libbtrfs_headers) $(DESTDIR)$(incdir)/btrfs
+	$(INSTALL) -m644 libbtrfsutil/btrfsutil.h $(DESTDIR)$(incdir)
+	$(INSTALL) -m755 -d $(DESTDIR)$(pkgconfigdir)
+	$(INSTALL) -m644 libbtrfsutil/libbtrfsutil.pc $(DESTDIR)$(pkgconfigdir)
 endif
 
 ifeq ($(PYTHON_BINDINGS),1)
@@ -661,6 +796,10 @@ install-static: $(progs_static) $(INSTALLDIRS)
 	$(INSTALL) $(progs_static) $(DESTDIR)$(bindir)
 	# btrfsck is a link to btrfs in the src tree, make it so for installed file as well
 	$(LN_S) -f btrfs.static $(DESTDIR)$(bindir)/btrfsck.static
+	$(INSTALL) -m755 -d $(DESTDIR)$(libdir)
+	$(INSTALL) $(libs_static) $(DESTDIR)$(libdir)
+	$(INSTALL) -m755 -d $(DESTDIR)$(incdir)/btrfs
+	$(INSTALL) -m644 $(libbtrfs_headers) $(DESTDIR)$(incdir)/btrfs
 
 $(INSTALLDIRS):
 	@echo "Making install in $(patsubst install-%,%,$@)"

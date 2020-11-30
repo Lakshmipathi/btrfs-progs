@@ -26,7 +26,7 @@
 #include <sys/time.h>
 
 #define BTRFS_UTIL_VERSION_MAJOR 1
-#define BTRFS_UTIL_VERSION_MINOR 0
+#define BTRFS_UTIL_VERSION_MINOR 2
 #define BTRFS_UTIL_VERSION_PATCH 0
 
 #ifdef __cplusplus
@@ -63,6 +63,10 @@ enum btrfs_util_error {
 	BTRFS_UTIL_ERROR_SYNC_FAILED,
 	BTRFS_UTIL_ERROR_START_SYNC_FAILED,
 	BTRFS_UTIL_ERROR_WAIT_SYNC_FAILED,
+	BTRFS_UTIL_ERROR_GET_SUBVOL_INFO_FAILED,
+	BTRFS_UTIL_ERROR_GET_SUBVOL_ROOTREF_FAILED,
+	BTRFS_UTIL_ERROR_INO_LOOKUP_USER_FAILED,
+	BTRFS_UTIL_ERROR_FS_INFO_FAILED,
 };
 
 /**
@@ -266,7 +270,8 @@ struct btrfs_util_subvolume_info {
  * to check whether the subvolume exists; %BTRFS_UTIL_ERROR_SUBVOLUME_NOT_FOUND
  * will be returned if it does not.
  *
- * This requires appropriate privilege (CAP_SYS_ADMIN).
+ * This requires appropriate privilege (CAP_SYS_ADMIN) unless @id is zero and
+ * the kernel supports BTRFS_IOC_GET_SUBVOL_INFO (kernel >= 4.18).
  *
  * Return: %BTRFS_UTIL_OK on success, non-zero error code on failure.
  */
@@ -466,6 +471,13 @@ enum btrfs_util_error btrfs_util_create_snapshot_fd2(int fd, int parent_fd,
  * @path: Path of the subvolume to delete.
  * @flags: Bitmask of BTRFS_UTIL_DELETE_SUBVOLUME_* flags.
  *
+ * This requires appropriate privilege (CAP_SYS_ADMIN), unless the filesystem is
+ * mounted with 'user_subvol_rm_allowed'.
+ *
+ * NOTE: Since kernel 4.18 it is possible to delete an empty subvolume using
+ * rmdir.  The sysfs file /sys/fs/btrfs/features/rmdir_subvol indicates whether
+ * this feature is enabled or not.
+ *
  * Return: %BTRFS_UTIL_OK on success, non-zero error code on failure.
  */
 enum btrfs_util_error btrfs_util_delete_subvolume(const char *path, int flags);
@@ -482,6 +494,17 @@ enum btrfs_util_error btrfs_util_delete_subvolume(const char *path, int flags);
 enum btrfs_util_error btrfs_util_delete_subvolume_fd(int parent_fd,
 						     const char *name,
 						     int flags);
+
+/**
+ * btrfs_util_delete_subvolume_by_id_fd() - Delete a subvolume or snapshot using
+ * subvolume id.
+ * @fd: File descriptor of the subvolume's parent directory.
+ * @subvolid: Subvolume id of the subvolume or snapshot to be deleted.
+ *
+ * Return: %BTRFS_UTIL_OK on success, non-zero error code on failure.
+ */
+enum btrfs_util_error btrfs_util_delete_subvolume_by_id_fd(int fd,
+							   uint64_t subvolid);
 
 struct btrfs_util_subvolume_iterator;
 
@@ -504,6 +527,12 @@ struct btrfs_util_subvolume_iterator;
  * the subvolume with this ID.
  * @flags: Bitmask of BTRFS_UTIL_SUBVOLUME_ITERATOR_* flags.
  * @ret: Returned iterator.
+ *
+ * Subvolume iterators require appropriate privilege (CAP_SYS_ADMIN) unless @top
+ * is zero and the kernel supports BTRFS_IOC_GET_SUBVOL_ROOTREF and
+ * BTRFS_IOC_INO_LOOKUP_USER (kernel >= 4.18). In this case, subvolumes which
+ * cannot be accessed (e.g., due to permissions or other mounts) will be
+ * skipped.
  *
  * The returned iterator must be freed with
  * btrfs_util_destroy_subvolume_iterator().
@@ -553,7 +582,8 @@ int btrfs_util_subvolume_iterator_fd(const struct btrfs_util_subvolume_iterator 
  * Must be freed with free().
  * @id_ret: Returned subvolume ID. May be %NULL.
  *
- * This requires appropriate privilege (CAP_SYS_ADMIN).
+ * This requires appropriate privilege (CAP_SYS_ADMIN) for kernels < 4.18. See
+ * btrfs_util_create_subvolume_iterator().
  *
  * Return: %BTRFS_UTIL_OK on success, %BTRFS_UTIL_ERROR_STOP_ITERATION if there
  * are no more subvolumes, non-zero error code on failure.
@@ -572,7 +602,8 @@ enum btrfs_util_error btrfs_util_subvolume_iterator_next(struct btrfs_util_subvo
  * This convenience function basically combines
  * btrfs_util_subvolume_iterator_next() and btrfs_util_subvolume_info().
  *
- * This requires appropriate privilege (CAP_SYS_ADMIN).
+ * This requires appropriate privilege (CAP_SYS_ADMIN) for kernels < 4.18. See
+ * btrfs_util_create_subvolume_iterator().
  *
  * Return: See btrfs_util_subvolume_iterator_next().
  */

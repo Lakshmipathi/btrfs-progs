@@ -23,9 +23,9 @@
 
 #include <btrfsutil.h>
 
-#include "ctree.h"
-#include "commands.h"
-#include "utils.h"
+#include "kernel-shared/ctree.h"
+#include "cmds/commands.h"
+#include "common/utils.h"
 #include "props.h"
 
 #define XATTR_BTRFS_PREFIX     "btrfs."
@@ -110,7 +110,7 @@ static int prop_compression(enum prop_object_type type,
 	fd = open_file_or_dir3(object, &dirstream, open_flags);
 	if (fd == -1) {
 		ret = -errno;
-		error("failed to open %s: %s", object, strerror(-ret));
+		error("failed to open %s: %m", object);
 		goto out;
 	}
 
@@ -133,8 +133,8 @@ static int prop_compression(enum prop_object_type type,
 	if (sret < 0) {
 		ret = -errno;
 		if (ret != -ENOATTR)
-			error("failed to %s compression for %s: %s",
-			      value ? "set" : "get", object, strerror(-ret));
+			error("failed to %s compression for %s: %m",
+			      value ? "set" : "get", object);
 		else
 			ret = 0;
 		goto out;
@@ -150,8 +150,7 @@ static int prop_compression(enum prop_object_type type,
 		sret = fgetxattr(fd, xattr_name, buf, len);
 		if (sret < 0) {
 			ret = -errno;
-			error("failed to get compression for %s: %s",
-			      object, strerror(-ret));
+			error("failed to get compression for %s: %m", object);
 			goto out;
 		}
 		fprintf(stdout, "compression=%.*s\n", (int)len, buf);
@@ -168,11 +167,25 @@ out:
 }
 
 const struct prop_handler prop_handlers[] = {
-	{"ro", "Set/get read-only flag of subvolume.", 0, prop_object_subvol,
-	 prop_read_only},
-	{"label", "Set/get label of device.", 0,
-	 prop_object_dev | prop_object_root, prop_label},
-	{"compression", "Set/get compression for a file or directory", 0,
-	 prop_object_inode, prop_compression},
+	{
+		.name ="ro",
+		.desc = "read-only status of a subvolume",
+		.read_only = 0,
+		.types = prop_object_subvol,
+	 	.handler = prop_read_only
+	},
+	{
+		.name = "label",
+		.desc = "label of the filesystem",
+		.read_only = 0,
+		.types = prop_object_dev | prop_object_root,
+		.handler = prop_label
+	},
+	{
+		.name = "compression",
+		.desc = "compression algorithm for the file or directory",
+		.read_only = 0,
+	 	.types = prop_object_inode, prop_compression
+	},
 	{NULL, NULL, 0, 0, NULL}
 };

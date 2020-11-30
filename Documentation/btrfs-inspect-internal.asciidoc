@@ -61,7 +61,7 @@ specify which mirror to print, valid values are 0, 1 and 2 and the superblock
 must be present on the device with a valid signature, can be used together with
 '--force'
 
-*dump-tree* [options] <device>::
+*dump-tree* [options] <device> [device...]::
 (replaces the standalone tool *btrfs-debug-tree*)
 +
 Dump tree structures from a given device in textual form, expand keys to human
@@ -86,9 +86,37 @@ the respective tree root block offset
 -u|--uuid::::
 print only the uuid tree information, empty output if the tree does not exist
 -b <block_num>::::
-print info of the specified block only
+print info of the specified block only, can be specified multiple times
 --follow::::
 use with '-b', print all children tree blocks of '<block_num>'
+--dfs::::
+(default up to 5.2)
++
+use depth-first search to print trees, the nodes and leaves are
+intermixed in the output
++
+--bfs::::
+(default since 5.3)
++
+use breadth-first search to print trees, the nodes are printed before all
+leaves
++
+--hide-names::::
+print a placeholder 'HIDDEN' instead of various names, useful for developers to
+inspect the dump while keeping potentially sensitive information hidden
++
+This is:
+[options="compact"]
+* directory entries (files, directories, subvolumes)
+* default subvolume
+* extended attributes (name, value)
+* hardlink names (if stored inside another item or as extended references in standalone items)
++
+NOTE: lengths are not hidden because they can be calculated from the item size anyway.
++
+--noscan::::
+do not automatically scan the system for other devices from the same
+filesystem, only use the devices provided as the arguments
 -t <tree_id>::::
 print only the tree with the specified ID, where the ID can be numerical or
 common name in a flexible human readable form
@@ -110,9 +138,9 @@ at 'path', ie. all hardlinks
 `Options`
 +
 -v::::
-verbose mode, print count of returned paths and ioctl() return value
+(deprecated) alias for global '-v' option
 
-*logical-resolve* [-Pv] [-s <bufsize>] <logical> <path>::
+*logical-resolve* [-Pvo] [-s <bufsize>] <logical> <path>::
 (needs root privileges)
 +
 resolve paths to all files at given 'logical' address in the linear filesystem space
@@ -121,10 +149,17 @@ resolve paths to all files at given 'logical' address in the linear filesystem s
 +
 -P::::
 skip the path resolving and print the inodes instead
--v::::
-verbose mode, print count of returned paths and all ioctl() return values
+-o::::
+ignore offsets, find all references to an extent instead of a single block.
+Requires kernel support for the V2 ioctl (added in 4.15). The results might need
+further processing to filter out unwanted extents by the offset that is supposed
+to be obtained by other means.
 -s <bufsize>::::
-set internal buffer for storing the file names to 'bufsize', default is 4096, maximum 64k
+set internal buffer for storing the file names to 'bufsize', default is 64k,
+maximum 16m.  Buffer sizes over 64K require kernel support for the V2 ioctl
+(added in 4.15).
+-v::::
+(deprecated) alias for global '-v' option
 
 *min-dev-size* [options] <path>::
 (needs root privileges)

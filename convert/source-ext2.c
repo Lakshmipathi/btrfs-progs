@@ -19,9 +19,9 @@
 #include "kerncompat.h"
 #include <linux/limits.h>
 #include <pthread.h>
-#include "disk-io.h"
-#include "transaction.h"
-#include "utils.h"
+#include "kernel-shared/disk-io.h"
+#include "kernel-shared/transaction.h"
+#include "common/utils.h"
 #include "convert/common.h"
 #include "convert/source-ext2.h"
 
@@ -87,8 +87,8 @@ static int ext2_open_fs(struct btrfs_convert_context *cctx, const char *name)
 	cctx->fs_data = ext2_fs;
 	cctx->blocksize = ext2_fs->blocksize;
 	cctx->block_count = ext2_fs->super->s_blocks_count;
-	cctx->total_bytes = ext2_fs->blocksize * ext2_fs->super->s_blocks_count;
-	cctx->volume_name = strndup(ext2_fs->super->s_volume_name, 16);
+	cctx->total_bytes = (u64)ext2_fs->super->s_blocks_count * ext2_fs->blocksize;
+	cctx->volume_name = strndup((char *)ext2_fs->super->s_volume_name, 16);
 	cctx->first_data_block = ext2_fs->super->s_first_data_block;
 	cctx->inodes_count = ext2_fs->super->s_inodes_count;
 	cctx->free_inodes_count = ext2_fs->super->s_free_inodes_count;
@@ -162,8 +162,8 @@ static int ext2_read_used_space(struct btrfs_convert_context *cctx)
 		}
 		ret = __ext2_add_one_block(fs, block_bitmap, i, used_tree);
 		if (ret < 0) {
-			error("fail to build used space tree, %s",
-			      strerror(-ret));
+			errno = -ret;
+			error("fail to build used space tree, %m");
 			break;
 		}
 		blk_itr += EXT2_CLUSTERS_PER_GROUP(fs->super);
@@ -797,7 +797,7 @@ static int ext2_copy_inodes(struct btrfs_convert_context *cctx,
 			    u32 convert_flags, struct task_ctx *p)
 {
 	ext2_filsys ext2_fs = cctx->fs_data;
-	int ret;
+	int ret = 0;
 	errcode_t err;
 	ext2_inode_scan ext2_scan;
 	struct ext2_inode ext2_inode;
@@ -810,8 +810,9 @@ static int ext2_copy_inodes(struct btrfs_convert_context *cctx,
 		return PTR_ERR(trans);
 	err = ext2fs_open_inode_scan(ext2_fs, 0, &ext2_scan);
 	if (err) {
-		fprintf(stderr, "ext2fs_open_inode_scan: %s\n", error_message(err));
-		return -1;
+		error("ext2fs_open_inode_scan failed: %s", error_message(err));
+		btrfs_commit_transaction(trans, root);
+		return -EIO;
 	}
 	while (!(err = ext2fs_get_next_inode(ext2_scan, &ext2_ino,
 					     &ext2_inode))) {
@@ -827,21 +828,51 @@ static int ext2_copy_inodes(struct btrfs_convert_context *cctx,
 		pthread_mutex_lock(&p->mutex);
 		p->cur_copy_inodes++;
 		pthread_mutex_unlock(&p->mutex);
-		if (ret)
-			return ret;
-		if (trans->blocks_used >= 4096) {
+		if (ret) {
+			error("failed to copy ext2 inode %llu: %d",
+					(unsigned long long)ext2_ino, ret);
+			goto out;
+		}
+		/*
+		 * blocks_used is the number of new tree blocks allocated in
+		 * current transaction.
+		 * Use a small amount of it to workaround a bug where delayed
+		 * ref may fail to locate tree blocks in extent tree.
+		 *
+		 * 2M is the threshold to kick chunk preallocator into work,
+		 * For default (16K) nodesize it will be 128 tree blocks,
+		 * large enough to contain over 300 inlined files or
+		 * around 26k file extents. Which should be good enough.
+		 */
+		if (trans->blocks_used >= SZ_2M / root->fs_info->nodesize) {
 			ret = btrfs_commit_transaction(trans, root);
-			BUG_ON(ret);
+			if (ret < 0) {
+				error("failed to commit transaction: %d", ret);
+				goto out;
+			}
 			trans = btrfs_start_transaction(root, 1);
-			BUG_ON(IS_ERR(trans));
+			if (IS_ERR(trans)) {
+				ret = PTR_ERR(trans);
+				error("failed to start transaction: %d", ret);
+				trans = NULL;
+				goto out;
+			}
 		}
 	}
 	if (err) {
-		fprintf(stderr, "ext2fs_get_next_inode: %s\n", error_message(err));
-		return -1;
+		error("ext2fs_get_next_inode failed: %s", error_message(err));
+		ret = -EIO;
+		goto out;
 	}
-	ret = btrfs_commit_transaction(trans, root);
-	BUG_ON(ret);
+out:
+	if (ret < 0) {
+		if (trans)
+			btrfs_abort_transaction(trans, ret);
+	} else {
+		ret = btrfs_commit_transaction(trans, root);
+		if (ret < 0)
+			error("failed to commit transaction: %d", ret);
+	}
 	ext2fs_close_inode_scan(ext2_scan);
 
 	return ret;

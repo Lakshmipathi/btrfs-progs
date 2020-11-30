@@ -1,4 +1,4 @@
-Btrfs-progs [![build status](https://travis-ci.org/kdave/btrfs-progs.svg?branch=devel)](https://travis-ci.org/kdave/btrfs-progs) [![coverity status](https://scan.coverity.com/projects/617/badge.svg)](https://scan.coverity.com/projects/btrfs-progs)
+Btrfs-progs [![build status](https://travis-ci.org/kdave/btrfs-progs.svg?branch=devel)](https://travis-ci.org/kdave/btrfs-progs) [![coverity status](https://scan.coverity.com/projects/617/badge.svg)](https://scan.coverity.com/projects/btrfs-progs) [![gitlab CI/CD](https://gitlab.com/kdave/btrfs-progs)](https://gitlab.com/kdave/btrfs-progs/badges/devel/build.svg)
 ===========
 
 Userspace utilities to manage btrfs filesystems.
@@ -13,8 +13,12 @@ This repository hosts following utilities:
 
 * **btrfs** &mdash; the main administration tool ([manual page](https://btrfs.wiki.kernel.org/index.php/Manpage/btrfs))
 * **mkfs.btrfs** &mdash; utility to create the filesystem ([manual page](https://btrfs.wiki.kernel.org/index.php/Manpage/mkfs.btrfs))
+* all-in-one binary in the busybox style with mkfs.btrfs, btrfs-image and other tools built-in ([standalone tools](https://github.com/kdave/btrfs-progs/blob/master/Documentation/btrfs.asciidoc#standalone-tools))
 
-See INSTALL for build instructions and [tests/README.md](tests/README.md) for
+The C and python 3 bindings are provided by a LGPL library **libbtrfsutil** see
+[libbtrfsutil/README.md](libbtrfsutil/README.md) for more.
+
+See [INSTALL](INSTALL) for build instructions and [tests/README.md](tests/README.md) for
 testing information.
 
 Release cycle
@@ -78,14 +82,35 @@ the patches meet some criteria (often lacking in github contributions):
     substitute in order to allow contributions without much bothering with
     formalities
 
+Source code coding style and preferences follow the
+[kernel coding style](https://www.kernel.org/doc/html/latest/process/coding-style.html).
+You can find the editor settins in `.editorconfig` and use the
+[EditorConfig](https://editorconfig.org/) plugin to let your editor use that,
+or update your editor settings manually.
+
 Documentation updates
 ---------------------
 
 Documentation fixes or updates do not need much explanation so sticking to the
-code rules in the previous section is not necessary. Github pull requests are
+code rules in the previous section is not necessary. GitHub pull requests are
 OK, patches could be sent to me directly and not required to be also in the
 mailinglist. Pointing out typos via IRC also works, although might get
 accidentally lost in the noise.
+
+Third-party sources
+-------------------
+
+Build dependencies are listed in [INSTALL](INSTALL). Implementation of checksum/hash
+functions is provided by copies of the respective sources to avoid adding
+dependencies that would make deployments in rescure or limited environments
+harder. The implementations are portable and not optimized for speed nor
+accelerated. Optionally it's possible to use libgcrypt, libsodium or libkcapi
+implementations.
+
+* CRC32C: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/
+* XXHASH: https://github.com/Cyan4973/xxHash
+* SHA256: https://tools.ietf.org/html/rfc4634
+* BLAKE2: https://github.com/BLAKE2/BLAKE2
 
 References
 ----------

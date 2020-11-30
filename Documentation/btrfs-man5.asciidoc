@@ -10,15 +10,14 @@ DESCRIPTION
 This document describes topics related to BTRFS that are not specific to the
 tools.  Currently covers:
 
-1. mount options
-
-2. filesystem features
-
-3. filesystem limits
-
-4. file attributes
-
-5. control device
+. mount options
+. filesystem features
+. checksum algorithms
+. filesystem limits
+. bootloader support
+. file attributes
+. control device
+. filesystems with multiple block group profiles
 
 
 MOUNT OPTIONS
@@ -34,6 +33,11 @@ and may change in the future. This means that (for example) you can't set
 per-subvolume 'nodatacow', 'nodatasum', or 'compress' using mount options. This
 should eventually be fixed, but it has proved to be difficult to implement
 correctly within the Linux VFS framework.
+
+Mount options are processed in order, only the last occurence of an option
+takes effect and may disable other options due to constraints (see eg.
+'nodatacow' and 'compress'). The output of 'mount' command shows which options
+have been applied.
 
 *acl*::
 *noacl*::
@@ -123,10 +127,10 @@ The upper bound is not forced, but a warning is printed if it's more than 300
 seconds (5 minutes). Use with care.
 
 *compress*::
-*compress='type'*::
+*compress='type[:level]'*::
 *compress-force*::
-*compress-force='type'*::
-(default: off)
+*compress-force='type[:level]'*::
+(default: off, level support since: 5.1)
 +
 Control BTRFS file data compression.  Type may be specified as 'zlib',
 'lzo', 'zstd' or 'no' (for no compression, used for remounting).  If no type
@@ -134,12 +138,21 @@ is specified, 'zlib' is used.  If 'compress-force' is specified,
 then compression will always be attempted, but the data may end up uncompressed
 if the compression would make them larger.
 +
+Both 'zlib' and 'zstd' (since version 5.1) expose the compression level as a
+tunable knob with higher levels trading speed and memory ('zstd') for higher
+compression ratios. This can be set by appending a colon and the desired level.
+Zlib accepts the range [1, 9] and zstd accepts [1, 15]. If no level is set,
+both currently use a default level of 3. The value 0 is an alias for the
+default level.
++
 Otherwise some simple heuristics are applied to detect an incompressible file.
 If the first blocks written to a file are not compressible, the whole file is
 permanently marked to skip compression. As this is too simple, the
 'compress-force' is a workaround that will compress most of the files at the
-cost of some wasted CPU cycles on failed attempts. The heuristics of 'compress'
-will improve in the future so this will not be necessary.
+cost of some wasted CPU cycles on failed attempts.
+Since kernel 4.15, a set of heuristic algorithms have been improved by using
+frequency sampling, repeated pattern detection and Shannon entropy calculation
+to avoid that.
 +
 NOTE: If compression is enabled, 'nodatacow' and 'nodatasum' are disabled.
 
@@ -154,7 +167,7 @@ under 'nodatacow' are also set the NOCOW file attribute (see `chattr`(1)).
 NOTE: If 'nodatacow' or 'nodatasum' are enabled, compression is disabled.
 +
 Updates in-place improve performance for workloads that do frequent overwrites,
-at the cost of potential partial writes, in case the write is interruted
+at the cost of potential partial writes, in case the write is interrupted
 (system crash, device failure).
 
 *datasum*::
@@ -169,7 +182,7 @@ corresponding file attribute (see `chattr`(1)).
 NOTE: If 'nodatacow' or 'nodatasum' are enabled, compression is disabled.
 +
 There is a slight performance gain when checksums are turned off, the
-correspoinding metadata blocks holding the checksums do not need to updated.
+corresponding metadata blocks holding the checksums do not need to updated.
 The cost of checksumming of the blocks in memory is much lower than the IO,
 modern CPUs feature hardware support of the checksumming algorithm.
 
@@ -183,7 +196,7 @@ missing, for example if a stripe member is completely missing from RAID0.
 Since 4.14, the constraint checks have been improved and are verified on the
 chunk level, not an the device level. This allows degraded mounts of
 filesystems with mixed RAID profiles for data and metadata, even if the
-device number constraints would not be satisfied for some of the prifles.
+device number constraints would not be satisfied for some of the profiles.
 +
 Example: metadata -- raid1, data -- single, devices -- /dev/sda, /dev/sdb
 +
@@ -204,28 +217,31 @@ paths are provided as the actual device nodes may not be discovered by the
 system at that point.
 
 *discard*::
+*discard=sync*::
+*discard=async*::
 *nodiscard*::
-(default: off)
+(default: off, async support since: 5.6)
 +
 Enable discarding of freed file blocks.  This is useful for SSD devices, thinly
 provisioned LUNs, or virtual machine images; however, every storage layer must
-support discard for it to work. if the backing device does not support
-asynchronous queued TRIM, then this operation can severely degrade performance,
+support discard for it to work.
++
+In the synchronous mode ('sync' or without option value), lack of asynchronous
+queued TRIM on the backing device TRIM can severely degrade performance,
 because a synchronous TRIM operation will be attempted instead. Queued TRIM
 requires newer than SATA revision 3.1 chipsets and devices.
-
++
+The asynchronous mode ('async') gathers extents in larger chunks before sending
+them to the devices for TRIM. The overhead and performance impact should be
+negligible compared to the previous mode and it's supposed to be the preferred
+mode if needed.
++
 If it is not necessary to immediately discard freed blocks, then the `fstrim`
 tool can be used to discard all free blocks in a batch. Scheduling a TRIM
 during a period of low system activity will prevent latent interference with
 the performance of other operations. Also, a device may ignore the TRIM command
 if the range is too small, so running a batch discard has a greater probability
 of actually discarding the blocks.
-
-If discarding is not necessary to be done at the block freeing time, there's
-`fstrim`(8) tool that lets the filesystem discard all free blocks in a batch,
-possibly not much interfering with other operations. Also, the device may
-ignore the TRIM command if the range is too small, so running the batch discard
-can actually discard the blocks.
 
 *enospc_debug*::
 *noenospc_debug*::
@@ -295,11 +311,12 @@ it possible to reach it. In such case, this mount option will help.
 Alternatively, files with high inode numbers can be copied to a new subvolume
 which will effectively start the inode numbers from the beginning again.
 
-*logreplay*::
 *nologreplay*::
-(default: on, even read-only)
+(default: off, even read-only)
 +
-Enable/disable log replay at mount time. See also 'treelog'.
+The tree-log contains pending updates to the filesystem until the full commit.
+The log is replayed on next mount, this can be disabled by this option.  See
+also 'treelog'.  Note that 'nologreplay' is the same as 'norecovery'.
 +
 WARNING: currently, the tree log is replayed even with a read-only mount! To
 disable that behaviour, mount also with 'nologreplay'.
@@ -336,7 +353,8 @@ inlined files).
 (since: 4.5, default: off)
 +
 Do not attempt any data recovery at mount time. This will disable 'logreplay'
-and avoids other write operations.
+and avoids other write operations. Note that this option is the same as
+'nologreplay'.
 +
 NOTE: The opposite option 'recovery' used to have different meaning but was
 changed for consistency with other filesystems, where 'norecovery' is used for
@@ -388,12 +406,13 @@ chosen, which is 'v1'.
 *ssd*::
 *ssd_spread*::
 *nossd*::
+*nossd_spread*::
 (default: SSD autodetected)
 +
 Options to control SSD allocation schemes.  By default, BTRFS will
 enable or disable SSD optimizations depending on status of a device with
 respect to rotational or non-rotational type. This is determined by the
-contents of '/sys/block/DEV/queue/rotational'). If it is 1, the 'ssd' option is
+contents of '/sys/block/DEV/queue/rotational'). If it is 0, the 'ssd' option is
 turned on.  The option 'nossd' will disable the autodetection.
 +
 The optimizations make use of the absence of the seek penalty that's inherent
@@ -411,7 +430,7 @@ fragmentation. The layout tuning has been kept intact for the option
 The 'ssd_spread' mount option attempts to allocate into bigger and aligned
 chunks of unused space, and may perform better on low-end SSDs.  'ssd_spread'
 implies 'ssd', enabling all other SSD heuristics as well. The option 'nossd'
-will disable all SSD options.
+will disable all SSD options while 'nossd_spread' only disables 'ssd_spread'.
 
 *subvol='path'*::
 Mount subvolume from 'path' rather than the toplevel subvolume. The
@@ -452,7 +471,6 @@ The tree log could contain new files/directories, these would not exist on
 a mounted filesystem if the log is not replayed.
 
 *usebackuproot*::
-*nousebackuproot*::
 (since: 4.6, default: off)
 +
 Enable autorecovery attempts if a bad tree root is found at mount time.
@@ -470,31 +488,21 @@ root user can do that.
 NOTE: historically, any user could create a snapshot even if he was not owner
 of the source subvolume, the subvolume deletion has been restricted for that
 reason. The subvolume creation has been restricted but this mount option is
-still required. This is a usability issue and will be addressed in the future.
+still required. This is a usability issue.
+Since 4.18, the `rmdir`(2) syscall can delete an empty subvolume just like an
+ordinary directory. Whether this is possible can be detected at runtime, see
+'rmdir_subvol' feature in 'FILESYSTEM FEATURES'.
 
 DEPRECATED MOUNT OPTIONS
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 List of mount options that have been removed, kept for backward compatibility.
 
-*alloc_start='bytes'*::
-(default: 1M, minimum: 1M, deprecated since: 4.13)
-+
-Debugging option to force all block allocations above a certain
-byte threshold on each block device.  The value is specified in
-bytes, optionally with a K, M, or G suffix (case insensitive).
-
 *recovery*::
 (since: 3.2, default: off, deprecated since: 4.5)
 +
 NOTE: this option has been replaced by 'usebackuproot' and should not be used
 but will work on 4.5+ kernels.
-
-*subvolrootid='objectid'*::
-(irrelevant since: 3.2, formally deprecated since: 3.10)
-+
-A workaround option from times (pre 3.2) when it was not possible to mount a
-subvolume that did not reside directly under the toplevel subvolume.
 
 NOTES ON GENERIC MOUNT OPTIONS
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -526,8 +534,8 @@ explicitly asked for so accidental use will not create incompatibilities.
 There are several classes and the respective tools to manage the features:
 
 at mkfs time only::
-This is namely for core structures, like the b-tree nodesize, see
-`mkfs.btrfs`(8) for more details.
+This is namely for core structures, like the b-tree nodesize or checksum
+algorithm, see `mkfs.btrfs`(8) for more details.
 
 after mkfs, on an unmounted filesystem::
 Features that may optimize internal structures or add new structures to support
@@ -577,6 +585,18 @@ increased hardlink limit per file in a directory to 65536, older kernels
 supported a varying number of hardlinks depending on the sum of all file name
 sizes that can be stored into one metadata block
 
+*free_space_tree*::
+(since: 4.5)
++
+free space representation using a dedicated b-tree, successor of v1 space cache
+
+*metadata_uuid*::
+(since: 5.0)
++
+the main filesystem UUID is the metadata_uuid, which stores the new UUID only
+in the superblock while all metadata blocks still have the UUID set at mkfs
+time, see `btrfstune`(8) for more
+
 *mixed_backref*::
 (since: 2.6.31)
 +
@@ -600,15 +620,120 @@ fragmented, which means worse performance
 improved representation of file extents where holes are not explicitly
 stored as an extent, saves a few percent of metadata if sparse files are used
 
+*raid1c34*::
+(since: 5.5)
++
+extended RAID1 mode with copies on 3 or 4 devices respectively
+
 *raid56*::
 (since: 3.9)
 +
 the filesystem contains or contained a raid56 profile of block groups
 
+*rmdir_subvol*::
+(since: 4.18)
++
+indicate that `rmdir`(2) syscall can delete an empty subvolume just like an
+ordinary directory. Note that this feature only depends on the kernel version.
+
 *skinny_metadata*::
 (since: 3.10)
 +
 reduced-size metadata for extent references, saves a few percent of metadata
+
+*supported_checksums*::
+(since: 5.5)
++
+list of checksum algorithms supported by the kernel module, the respective
+modules or built-in implementing the algorithms need to be present to mount
+the filesystem
+
+SWAPFILE SUPPORT
+~~~~~~~~~~~~~~~~
+
+The swapfile is supported since kernel 5.0. Use `swapon`(8) to activate the
+swapfile. There are some limitations of the implementation in btrfs and linux
+swap subsystem:
+ 
+* filesystem - must be only single device
+* swapfile - the containing subvolume cannot be snapshotted
+* swapfile - must be preallocated
+* swapfile - must be nodatacow (ie. also nodatasum)
+* swapfile - must not be compressed
+ 
+The limitations come namely from the COW-based design and mapping layer of
+blocks that allows the advanced features like relocation and multi-device
+filesystems. However, the swap subsystem expects simpler mapping and no
+background changes of the file blocks once they've been attached to swap.
+ 
+With active swapfiles, the following whole-filesystem operations will skip
+swapfile extents or may fail:
+ 
+* balance - block groups with swapfile extents are skipped and reported, the rest will be processed normally
+* resize grow - unaffected
+* resize shrink - works as long as the extents are outside of the shrunk range
+* device add - a new device does not interfere with existing swapfile and this operation will work, though no new swapfile can be activated afterwards
+* device delete - if the device has been added as above, it can be also deleted
+* device replace - ditto
+ 
+When there are no active swapfiles and a whole-filesystem exclusive operation
+is running (ie. balance, device delete, shrink), the swapfiles cannot be
+temporarily activated. The operation must finish first.
+ 
+--------------------
+# truncate -s 0 swapfile
+# chattr +C swapfile
+# fallocate -l 2G swapfile
+# chmod 0600 swapfile
+# mkswap swapfile
+# swapon swapfile
+--------------------
+
+
+CHECKSUM ALGORITHMS
+-------------------
+
+There are several checksum algorithms supported. The default and backward
+compatible is 'crc32c'. Since kernel 5.5 there are three more with different
+characteristics and trade-offs regarding speed and strength. The following
+list may help you to decide which one to select.
+
+*CRC32C* (32bit digest)::
+default, best backward compatibility, very fast, modern CPUs have
+instruction-level support, not collision-resistant but still good error
+detection capabilities
+
+*XXHASH* (64bit digest)::
+can be used as CRC32C successor, very fast, optimized for modern CPUs utilizing
+instruction pipelining, good collision resistance and error detection
+
+*SHA256* (256bit digest)::
+a cryptographic-strength hash, relatively slow but with possible CPU
+instruction acceleration or specialized hardware cards, FIPS certified and
+in wide use
+
+*BLAKE2b* (256bit digest)::
+a cryptographic-strength hash, relatively fast with possible CPU acceleration
+using SIMD extensions, not standardized but based on BLAKE which was a SHA3
+finalist, in wide use, the algorithm used is BLAKE2b-256 that's optimized for
+64bit platforms
+
+The 'digest size' affects overall size of data block checksums stored in the
+filesystem.  The metadata blocks have a fixed area up to 256bits (32 bytes), so
+there's no increase. Each data block has a separate checksum stored, with
+additional overhead of the b-tree leaves.
+
+Approximate relative performance of the algorithms, measured against CRC32C
+using reference software implementations on a 3.5GHz intel CPU:
+
+[ cols="^,>,>",width="50%" ]
+|================================
+h| Digest h| Cycles/4KiB h| Ratio
+| CRC32C   |   1700       |  1.00
+| XXHASH   |   2500       |  1.44
+| SHA256   | 105000       |    61
+| BLAKE2b  |  22000       |    13
+|================================
 
 
 FILESYSTEM LIMITS
@@ -619,10 +744,11 @@ maximum file name length::
 
 maximum symlink target length::
 depends on the 'nodesize' value, for 4k it's 3949 bytes, for larger nodesize
-it's 4095
+it's 4095 due to the system limit PATH_MAX
 +
-The symlink target may not be a valid path, ie the path name components
-can exceed the limits, there's no content validation at `symlink`(3) creation.
+The symlink target may not be a valid path, ie. the path name components
+can exceed the limits (NAME_MAX), there's no content validation at `symlink`(3)
+creation.
 
 maximum number of inodes::
 2^64^ but depends on the available metadata space as the inodes are created
@@ -635,19 +761,53 @@ maximum file length::
 inherent limit of btrfs is 2^64^ (16 EiB) but the linux VFS limit is 2^63^ (8 EiB)
 
 maximum number of subvolumes::
-2^64^ but depends on the available metadata space, the space consumed by all
-subvolume metadata includes bookeeping of the shared extents can be large (MiB,
-GiB)
+the subvolume ids can go up to 2^64^ but the number of actual subvolumes
+depends on the available metadata space, the space consumed by all subvolume
+metadata includes bookkeeping of shared extents can be large (MiB, GiB)
 
 maximum number of hardlinks of a file in a directory::
 65536 when the `extref` feature is turned on during mkfs (default), roughly
 100 otherwise
 
+minimum filesystem size::
+the minimal size of each device depends on the 'mixed-bg' feature, without that
+(the default) it's about 109MiB, with mixed-bg it's is 16MiB
+
+
+BOOTLOADER SUPPORT
+------------------
+
+GRUB2 (https://www.gnu.org/software/grub) has the most advanced support of
+booting from BTRFS with respect to features.
+
+U-boot (https://www.denx.de/wiki/U-Boot/) has decent support for booting but
+not all BTRFS features are implemented, check the documentation.
+
+EXTLINUX (from the https://syslinux.org project) can boot but does not support
+all features. Please check the upstream documentation before you use it.
+
+The first 1MiB on each device is unused with the exception of primary
+superblock that is on the offset 64KiB and spans 4KiB.
+
 
 FILE ATTRIBUTES
 ---------------
-The btrfs filesystem supports setting the following file attributes using the
-`chattr`(1) utility:
+The btrfs filesystem supports setting file attributes or flags. Note there are
+old and new interfaces, with confusing names. The following list should clarify
+that:
+
+* 'attributes': `chattr`(1) or `lsattr`(1) utilities (the ioctls are
+FS_IOC_GETFLAGS and FS_IOC_SETFLAGS), due to the ioctl names the attributes are
+also called flags
+* 'xflags': to distinguish from the previous, it's extended flags, with tunable
+bits similar to the attributes but extensible and new bits will be added in the
+future (the ioctls are FS_IOC_FSGETXATTR and FS_IOC_FSSETXATTR but they are not
+related to extended attributes that are also called xattrs), there's no standard
+tool to change the bits, there's support in `xfs_io`(8) as command *xfs_io -c
+chattr*
+
+ATTRIBUTES
+~~~~~~~~~~
 
 *a*::
 'append only', new writes are always written at the end of the file
@@ -663,7 +823,7 @@ directory attributes.
 When set on a directory, all newly created files will inherit this attribute.
 
 *C*::
-'no copy-on-write', file modifications are done in-place
+'no copy-on-write', file data modifications are done in-place
 +
 When set on a directory, all newly created files will inherit this attribute.
 +
@@ -694,6 +854,28 @@ When set on a directory, all newly created files will inherit this attribute.
 
 No other attributes are supported.  For the complete list please refer to the
 `chattr`(1) manual page.
+
+XFLAGS
+~~~~~~
+
+There's overlap of letters assigned to the bits with the attributes, this list
+refers to what `xfs_io`(8) provides:
+
+*i*::
+'immutable', same as the attribute
+
+*a*::
+'append only', same as the attribute
+
+*s*::
+'synchronous updates', same as the atribute 'S'
+
+*A*::
+'no atime updates', same as the attribute
+
+*d*::
+'no dump', same as the attribute
+
 
 CONTROL DEVICE
 --------------
@@ -726,6 +908,70 @@ The control device is not strictly required but the device scanning will not
 work and a workaround would need to be used to mount a multi-device filesystem.
 The mount option 'device' can trigger the device scanning during mount.
 
+
+FILESYSTEM WITH MULTIPLE PROFILES
+---------------------------------
+
+It is possible that a btrfs filesystem contains multiple block group profiles
+of the same type.  This could happen when a profile conversion using balance
+filters is interrupted (see `btrfs-balance`(8)).  Some 'btrfs' commands perform
+a test to detect this kind of condition and print a warning like this:
+
+--------------------
+WARNING: Multiple block group profiles detected, see 'man btrfs(5)'.
+WARNING:   Data: single, raid1
+WARNING:   Metadata: single, raid1
+--------------------
+
+The corresponding output of *btrfs filesystem df* might look like:
+
+--------------------
+WARNING: Multiple block group profiles detected, see 'man btrfs(5)'.
+WARNING:   Data: single, raid1
+WARNING:   Metadata: single, raid1
+Data, RAID1: total=832.00MiB, used=0.00B
+Data, single: total=1.63GiB, used=0.00B
+System, single: total=4.00MiB, used=16.00KiB
+Metadata, single: total=8.00MiB, used=112.00KiB
+Metadata, RAID1: total=64.00MiB, used=32.00KiB
+GlobalReserve, single: total=16.25MiB, used=0.00B
+--------------------
+
+There's more than one line for type 'Data' and 'Metadata', while the profiles
+are 'single' and 'RAID1'.
+
+This state of the filesystem OK but most likely needs the user/administrator to
+take an action and finish the interrupted tasks. This cannot be easily done
+automatically, also the user knows the expected final profiles.
+
+In the example above, the filesystem started as a single device and 'single'
+block group profile. Then another device was added, followed by balance with
+'convert=raid1' but for some reason hasn't finished. Restarting the balance
+with 'convert=raid1' will continue and end up with filesystem with all block
+group profiles 'RAID1'.
+
+NOTE: If you're familiar with balance filters, you can use
+'convert=raid1,profiles=single,soft', which will take only the unconverted
+'single' profiles and convert them to 'raid1'. This may speed up the conversion
+as it would not try to rewrite the already convert 'raid1' profiles.
+
+Having just one profile is desired as this also clearly defines the profile of
+newly allocated block groups, otherwise this depends on internal allocation
+policy. When there are multiple profiles present, the order of selection is
+RAID6, RAID5, RAID10, RAID1, RAID0 as long as the device number constraints are
+satisfied.
+
+Commands that print the warning were chosen so they're brought to user
+attention when the filesystem state is being changed in that regard. This is:
+'device add', 'device delete', 'balance cancel', 'balance pause'. Commands
+that report space usage: 'filesystem df', 'device usage'. The command
+'filesystem usage' provides a line in the overall summary:
+
+---------------
+    Multiple profiles:                 yes (data, metadata)
+---------------
+
+
 SEE ALSO
 --------
 `acl`(5),
@@ -734,4 +980,5 @@ SEE ALSO
 `fstrim`(8),
 `ioctl`(2),
 `mkfs.btrfs`(8),
-`mount`(8)
+`mount`(8),
+`swapon`(8)

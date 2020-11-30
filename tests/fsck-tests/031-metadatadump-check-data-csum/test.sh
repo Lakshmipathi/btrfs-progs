@@ -1,5 +1,5 @@
 #!/bin/bash
-# To check if "btrfs check" can detect metadata dump (restored by btrfs-iamge)
+# To check if "btrfs check" can detect metadata dump (restored by btrfs-image)
 # and ignore --check-data-csum option
 
 source "$TEST_TOP/common"
@@ -10,7 +10,7 @@ check_prereq btrfs-image
 setup_root_helper
 prepare_test_dev
 
-run_check $SUDO_HELPER "$TOP/mkfs.btrfs" -f "$TEST_DEV"
+run_check_mkfs_test_dev
 run_check_mount_test_dev
 
 run_check $SUDO_HELPER dd if=/dev/urandom of="$TEST_MNT/file" bs=4k count=16
@@ -21,7 +21,7 @@ chmod a+w restored_image
 run_check $SUDO_HELPER "$TOP/btrfs-image" "$TEST_DEV" "restored_image"
 
 # use prepare_test_dev() to wipe all existing data on $TEST_DEV
-# so there is no way that restored image could have mathcing data csum
+# so there is no way that restored image could have matching data csum
 prepare_test_dev
 
 run_check $SUDO_HELPER "$TOP/btrfs-image" -r "restored_image" "$TEST_DEV"

@@ -45,6 +45,9 @@
 #define BG_ACCOUNTING_ERROR     (1<<21) /* Block group accounting error */
 #define FATAL_ERROR             (1<<22) /* Fatal bit for errno */
 #define INODE_FLAGS_ERROR	(1<<23) /* Invalid inode flags */
+#define DIR_ITEM_HASH_MISMATCH	(1<<24) /* Dir item hash mismatch */
+#define INODE_MODE_ERROR	(1<<25) /* Bad inode mode */
+#define INVALID_GENERATION	(1<<26)	/* Generation is too new */
 
 /*
  * Error bit for low memory mode check.
@@ -56,14 +59,14 @@
 #define BACKREF_MISMATCH	(1 << 1) /* Backref exists but does not match */
 #define BYTES_UNALIGNED		(1 << 2) /* Some bytes are not aligned */
 #define REFERENCER_MISSING	(1 << 3) /* Referencer not found */
-#define REFERENCER_MISMATCH	(1 << 4) /* Referenceer found but does not match */
+#define REFERENCER_MISMATCH	(1 << 4) /* Referencer found but does not match */
 #define CROSSING_STRIPE_BOUNDARY (1 << 4) /* For kernel scrub workaround */
 #define ITEM_SIZE_MISMATCH	(1 << 5) /* Bad item size */
 #define UNKNOWN_TYPE		(1 << 6) /* Unknown type */
 #define ACCOUNTING_MISMATCH	(1 << 7) /* Used space accounting error */
 #define CHUNK_TYPE_MISMATCH	(1 << 8)
 
-int check_fs_roots_lowmem(struct btrfs_fs_info *fs_info);
-int check_chunks_and_extents_lowmem(struct btrfs_fs_info *fs_info);
+int check_fs_roots_lowmem(void);
+int check_chunks_and_extents_lowmem(void);
 
 #endif

@@ -26,13 +26,13 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <libgen.h>
-#include "ctree.h"
-#include "transaction.h"
-#include "utils.h"
+#include "kernel-shared/ctree.h"
+#include "kernel-shared/transaction.h"
+#include "common/utils.h"
 #include "ioctl.h"
 #include <uuid/uuid.h>
 #include "btrfs-list.h"
-#include "rbtree-utils.h"
+#include "common/rbtree-utils.h"
 
 #define BTRFS_LIST_NFILTERS_INCREASE	(2 * BTRFS_LIST_FILTER_MAX)
 #define BTRFS_LIST_NCOMPS_INCREASE	(2 * BTRFS_LIST_COMP_MAX)
@@ -43,6 +43,16 @@
 struct root_lookup {
 	struct rb_root root;
 };
+
+static inline struct root_info *to_root_info(struct rb_node *node)
+{
+	return rb_entry(node, struct root_info, rb_node);
+}
+
+static inline struct root_info *to_root_info_sorted(struct rb_node *node)
+{
+	return rb_entry(node, struct root_info, sort_node);
+}
 
 static struct {
 	char	*name;
@@ -309,7 +319,7 @@ static int sort_tree_insert(struct root_lookup *sort_tree,
 
 	while (*p) {
 		parent = *p;
-		curr = rb_entry(parent, struct root_info, sort_node);
+		curr = to_root_info_sorted(parent);
 
 		ret = sort_comp(ins, curr, comp_set);
 		if (ret < 0)
@@ -340,7 +350,7 @@ static int root_tree_insert(struct root_lookup *root_tree,
 
 	while(*p) {
 		parent = *p;
-		curr = rb_entry(parent, struct root_info, rb_node);
+		curr = to_root_info(parent);
 
 		ret = comp_entry_with_rootid(ins, curr, 0);
 		if (ret < 0)
@@ -371,7 +381,7 @@ static struct root_info *root_tree_search(struct root_lookup *root_tree,
 	tmp.root_id = root_id;
 
 	while(n) {
-		entry = rb_entry(n, struct root_info, rb_node);
+		entry = to_root_info(n);
 
 		ret = comp_entry_with_rootid(&tmp, entry, 0);
 		if (ret < 0)
@@ -505,8 +515,9 @@ static int add_root(struct root_lookup *root_lookup,
 
 	ret = root_tree_insert(root_lookup, ri);
 	if (ret < 0) {
-		error("failed to insert subvolume %llu to tree: %s",
-				(unsigned long long)root_id, strerror(-ret));
+		errno = -ret;
+		error("failed to insert subvolume %llu to tree: %m",
+				(unsigned long long)root_id);
 		exit(1);
 	}
 	return 0;
@@ -528,7 +539,7 @@ static void free_root_info(struct rb_node *node)
 {
 	struct root_info *ri;
 
-	ri = rb_entry(node, struct root_info, rb_node);
+	ri = to_root_info(node);
 	free(ri->name);
 	free(ri->path);
 	free(ri->full_path);
@@ -1268,7 +1279,7 @@ static void filter_and_sort_subvol(struct root_lookup *all_subvols,
 
 	n = rb_last(&all_subvols->root);
 	while (n) {
-		entry = rb_entry(n, struct root_info, rb_node);
+		entry = to_root_info(n);
 
 		ret = resolve_root(all_subvols, entry, top_id);
 		if (ret == -ENOENT) {
@@ -1300,7 +1311,7 @@ static int list_subvol_fill_paths(int fd, struct root_lookup *root_lookup)
 	while (n) {
 		struct root_info *entry;
 		int ret;
-		entry = rb_entry(n, struct root_info, rb_node);
+		entry = to_root_info(n);
 		ret = lookup_ino_path(fd, entry);
 		if (ret && ret != -ENOENT)
 			return ret;
@@ -1467,7 +1478,7 @@ static void print_all_subvol_info(struct root_lookup *sorted_tree,
 
 	n = rb_first(&sorted_tree->root);
 	while (n) {
-		entry = rb_entry(n, struct root_info, sort_node);
+		entry = to_root_info_sorted(n);
 
 		/* The toplevel subvolume is not listed by default */
 		if (entry->root_id == BTRFS_FS_TREE_OBJECTID)
@@ -1558,7 +1569,7 @@ int btrfs_get_toplevel_subvol(int fd, struct root_info *the_ri)
 		return ret;
 
 	rbn = rb_first(&rl.root);
-	ri = rb_entry(rbn, struct root_info, rb_node);
+	ri = to_root_info(rbn);
 
 	if (ri->root_id != BTRFS_FS_TREE_OBJECTID)
 		return -ENOENT;
@@ -1590,7 +1601,7 @@ int btrfs_get_subvol(int fd, struct root_info *the_ri)
 
 	rbn = rb_first(&rl.root);
 	while(rbn) {
-		ri = rb_entry(rbn, struct root_info, rb_node);
+		ri = to_root_info(rbn);
 		rr = resolve_root(&rl, ri, root_id);
 		if (rr == -ENOENT) {
 			ret = -ENOENT;
@@ -1814,7 +1825,7 @@ char *btrfs_list_path_for_root(int fd, u64 root)
 	while (n) {
 		struct root_info *entry;
 
-		entry = rb_entry(n, struct root_info, rb_node);
+		entry = to_root_info(n);
 		ret = resolve_root(&root_lookup, entry, top_id);
 		if (ret == -ENOENT && entry->root_id == root) {
 			ret_path = NULL;

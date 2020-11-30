@@ -16,12 +16,12 @@ opts="-j16 $@"
 conf=
 target=
 
-function die() {
+die() {
 	echo "ERROR: $@"
 	exit 1
 }
 
-function check_result() {
+check_result() {
 	local ret
 	local str
 
@@ -37,7 +37,7 @@ function check_result() {
 $str"
 }
 
-function buildme() {
+buildme() {
 	make clean-all
 
 	./autogen.sh && configure "$conf" || die "configure not working with: $@"
@@ -47,12 +47,15 @@ function buildme() {
 	echo "VERDICT: $verdict"
 }
 
-function build_make_targets() {
+build_make_targets() {
 	# defaults
 	target=
 	buildme
 	# defaults, static
 	target=static
+	buildme
+	# defaults, busybox
+	target='btrfs.box btrfs.box.static'
 	buildme
 	# defaults, 32bit
 	target="EXTRA_CFLAGS=-m32"

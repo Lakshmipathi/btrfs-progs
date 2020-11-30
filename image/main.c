@@ -28,16 +28,19 @@
 #include <getopt.h>
 
 #include "kerncompat.h"
-#include "crc32c.h"
-#include "ctree.h"
-#include "disk-io.h"
-#include "transaction.h"
-#include "utils.h"
-#include "volumes.h"
-#include "extent_io.h"
-#include "help.h"
+#include "crypto/crc32c.h"
+#include "kernel-shared/ctree.h"
+#include "kernel-shared/disk-io.h"
+#include "kernel-shared/transaction.h"
+#include "common/utils.h"
+#include "kernel-shared/volumes.h"
+#include "kernel-shared/extent_io.h"
+#include "common/extent-cache.h"
+#include "common/help.h"
+#include "common/device-utils.h"
 #include "image/metadump.h"
 #include "image/sanitize.h"
+#include "common/box.h"
 
 #define MAX_WORKER_THREADS	(32)
 
@@ -91,15 +94,23 @@ struct mdrestore_struct {
 	pthread_mutex_t mutex;
 	pthread_cond_t cond;
 
+	/*
+	 * Records system chunk ranges, so restore can use this to determine
+	 * if an item is in chunk tree range.
+	 */
+	struct cache_tree sys_chunks;
 	struct rb_root chunk_tree;
 	struct rb_root physical_tree;
 	struct list_head list;
 	struct list_head overlapping_chunks;
+	struct btrfs_super_block *original_super;
 	size_t num_items;
 	u32 nodesize;
 	u64 devid;
 	u64 alloced_chunks;
 	u64 last_physical_offset;
+	/* An quicker checker for if a item is in sys chunk range */
+	u64 sys_chunk_end;
 	u8 uuid[BTRFS_UUID_SIZE];
 	u8 fsid[BTRFS_FSID_SIZE];
 
@@ -113,17 +124,16 @@ struct mdrestore_struct {
 	struct btrfs_fs_info *info;
 };
 
-static int search_for_chunk_blocks(struct mdrestore_struct *mdres,
-				   u64 search, u64 cluster_bytenr);
 static struct extent_buffer *alloc_dummy_eb(u64 bytenr, u32 size);
 
 static void csum_block(u8 *buf, size_t len)
 {
-	u8 result[btrfs_csum_sizes[BTRFS_CSUM_TYPE_CRC32]];
+	u16 csum_size = btrfs_csum_type_size(BTRFS_CSUM_TYPE_CRC32);
+	u8 result[csum_size];
 	u32 crc = ~(u32)0;
 	crc = crc32c(crc, buf + BTRFS_CSUM_SIZE, len - BTRFS_CSUM_SIZE);
-	btrfs_csum_final(crc, result);
-	memcpy(buf, result, btrfs_csum_sizes[BTRFS_CSUM_TYPE_CRC32]);
+	put_unaligned_le32(~crc, result);
+	memcpy(buf, result, csum_size);
 }
 
 static int has_name(struct btrfs_key *key)
@@ -499,7 +509,8 @@ static int write_buffers(struct metadump_struct *md, u64 *next)
 	}
 
 	if (err) {
-		error("one of the threads failed: %s", strerror(-err));
+		errno = -err;
+		error("one of the threads failed: %m");
 		goto out;
 	}
 
@@ -690,10 +701,12 @@ static int flush_pending(struct metadump_struct *md, int done)
 	}
 	if (md->num_items >= ITEMS_PER_CLUSTER || done) {
 		ret = write_buffers(md, &start);
-		if (ret)
-			error("unable to write buffers: %s", strerror(-ret));
-		else
+		if (ret) {
+			errno = -ret;
+			error("unable to write buffers: %m");
+		} else {
 			meta_cluster_init(md, start);
+		}
 	}
 	pthread_mutex_unlock(&md->mutex);
 	return ret;
@@ -716,43 +729,6 @@ static int add_extent(u64 start, u64 size, struct metadump_struct *md,
 	md->data = data;
 	return 0;
 }
-
-#ifdef BTRFS_COMPAT_EXTENT_TREE_V0
-static int is_tree_block(struct btrfs_root *extent_root,
-			 struct btrfs_path *path, u64 bytenr)
-{
-	struct extent_buffer *leaf;
-	struct btrfs_key key;
-	u64 ref_objectid;
-	int ret;
-
-	leaf = path->nodes[0];
-	while (1) {
-		struct btrfs_extent_ref_v0 *ref_item;
-		path->slots[0]++;
-		if (path->slots[0] >= btrfs_header_nritems(leaf)) {
-			ret = btrfs_next_leaf(extent_root, path);
-			if (ret < 0)
-				return ret;
-			if (ret > 0)
-				break;
-			leaf = path->nodes[0];
-		}
-		btrfs_item_key_to_cpu(leaf, &key, path->slots[0]);
-		if (key.objectid != bytenr)
-			break;
-		if (key.type != BTRFS_EXTENT_REF_V0_KEY)
-			continue;
-		ref_item = btrfs_item_ptr(leaf, path->slots[0],
-					  struct btrfs_extent_ref_v0);
-		ref_objectid = btrfs_ref_objectid_v0(leaf, ref_item);
-		if (ref_objectid < BTRFS_FIRST_FREE_OBJECTID)
-			return 1;
-		break;
-	}
-	return 0;
-}
-#endif
 
 static int copy_tree_blocks(struct btrfs_root *root, struct extent_buffer *eb,
 			    struct metadump_struct *metadump, int root_tree)
@@ -971,30 +947,10 @@ static int copy_from_extent_tree(struct metadump_struct *metadump,
 				}
 			}
 		} else {
-#ifdef BTRFS_COMPAT_EXTENT_TREE_V0
-			ret = is_tree_block(extent_root, path, bytenr);
-			if (ret < 0) {
-				error("failed to check tree block %llu: %d",
-					(unsigned long long)bytenr, ret);
-				break;
-			}
-
-			if (ret) {
-				ret = add_extent(bytenr, num_bytes, metadump,
-						 0);
-				if (ret) {
-					error("unable to add block %llu: %d",
-						(unsigned long long)bytenr, ret);
-					break;
-				}
-			}
-			ret = 0;
-#else
 			error(
-	"either extent tree is corrupted or you haven't built with V0 support");
+	"either extent tree is corrupted or deprecated extent ref format");
 			ret = -EIO;
 			break;
-#endif
 		}
 		bytenr += num_bytes;
 	}
@@ -1130,6 +1086,12 @@ static int update_super(struct mdrestore_struct *mdres, u8 *buffer)
 	u8 *ptr, *write_ptr;
 	int old_num_stripes;
 
+	/* No need to fix, use all data as is */
+	if (btrfs_super_num_devices(mdres->original_super) == 1) {
+		new_array_size = btrfs_super_sys_array_size(super);
+		goto finish;
+	}
+
 	write_ptr = ptr = super->sys_chunk_array;
 	array_size = btrfs_super_sys_array_size(super);
 
@@ -1180,6 +1142,7 @@ static int update_super(struct mdrestore_struct *mdres, u8 *buffer)
 		cur += btrfs_chunk_item_size(old_num_stripes);
 	}
 
+finish:
 	if (mdres->clear_space_cache)
 		btrfs_set_super_cache_generation(super, 0);
 
@@ -1248,6 +1211,8 @@ static int fixup_chunk_tree_block(struct mdrestore_struct *mdres,
 	u64 bytenr = async->start;
 	int i;
 
+	if (btrfs_super_num_devices(mdres->original_super) == 1)
+		return 0;
 	if (size_left % mdres->nodesize)
 		return 0;
 
@@ -1401,7 +1366,7 @@ static void *restore_worker(void *data)
 		list_del_init(&async->list);
 
 		if (mdres->compress_method == COMPRESS_ZLIB) {
-			size = compress_size; 
+			size = compress_size;
 			pthread_mutex_unlock(&mdres->mutex);
 			ret = uncompress(buffer, (unsigned long *)&size,
 					 async->buffer, async->bufsize);
@@ -1418,6 +1383,8 @@ static void *restore_worker(void *data)
 
 		if (!mdres->multi_devices) {
 			if (async->start == BTRFS_SUPER_INFO_OFFSET) {
+				memcpy(mdres->original_super, outbuf,
+				       BTRFS_SUPER_INFO_SIZE);
 				if (mdres->old_restore) {
 					update_super_old(outbuf);
 				} else {
@@ -1508,6 +1475,7 @@ static void mdrestore_destroy(struct mdrestore_struct *mdres, int num_threads)
 		rb_erase(&entry->p, &mdres->physical_tree);
 		free(entry);
 	}
+	free_extent_cache_tree(&mdres->sys_chunks);
 	pthread_mutex_lock(&mdres->mutex);
 	mdres->done = 1;
 	pthread_cond_broadcast(&mdres->cond);
@@ -1518,6 +1486,7 @@ static void mdrestore_destroy(struct mdrestore_struct *mdres, int num_threads)
 
 	pthread_cond_destroy(&mdres->cond);
 	pthread_mutex_destroy(&mdres->mutex);
+	free(mdres->original_super);
 }
 
 static int mdrestore_init(struct mdrestore_struct *mdres,
@@ -1532,6 +1501,7 @@ static int mdrestore_init(struct mdrestore_struct *mdres,
 	pthread_mutex_init(&mdres->mutex, NULL);
 	INIT_LIST_HEAD(&mdres->list);
 	INIT_LIST_HEAD(&mdres->overlapping_chunks);
+	cache_tree_init(&mdres->sys_chunks);
 	mdres->in = in;
 	mdres->out = out;
 	mdres->old_restore = old_restore;
@@ -1542,6 +1512,10 @@ static int mdrestore_init(struct mdrestore_struct *mdres,
 	mdres->clear_space_cache = 0;
 	mdres->last_physical_offset = 0;
 	mdres->alloced_chunks = 0;
+
+	mdres->original_super = malloc(BTRFS_SUPER_INFO_SIZE);
+	if (!mdres->original_super)
+		return -ENOMEM;
 
 	if (!num_threads)
 		return 0;
@@ -1574,9 +1548,14 @@ static int fill_mdres_info(struct mdrestore_struct *mdres,
 		return 0;
 
 	if (mdres->compress_method == COMPRESS_ZLIB) {
-		size_t size = MAX_PENDING_SIZE * 2;
+		/*
+		 * We know this item is superblock, its should only be 4K.
+		 * Don't need to waste memory following max_pending_size as it
+		 * can be as large as 256M.
+		 */
+		size_t size = BTRFS_SUPER_INFO_SIZE;
 
-		buffer = malloc(MAX_PENDING_SIZE * 2);
+		buffer = malloc(size);
 		if (!buffer)
 			return -ENOMEM;
 		ret = uncompress(buffer, (unsigned long *)&size,
@@ -1593,9 +1572,12 @@ static int fill_mdres_info(struct mdrestore_struct *mdres,
 
 	super = (struct btrfs_super_block *)outbuf;
 	mdres->nodesize = btrfs_super_nodesize(super);
-	memcpy(mdres->fsid, super->fsid, BTRFS_FSID_SIZE);
-	memcpy(mdres->uuid, super->dev_item.uuid,
-		       BTRFS_UUID_SIZE);
+	if (btrfs_super_incompat_flags(super) &
+	    BTRFS_FEATURE_INCOMPAT_METADATA_UUID)
+		memcpy(mdres->fsid, super->metadata_uuid, BTRFS_FSID_SIZE);
+	else
+		memcpy(mdres->fsid, super->fsid, BTRFS_FSID_SIZE);
+	memcpy(mdres->uuid, super->dev_item.uuid, BTRFS_UUID_SIZE);
 	mdres->devid = le64_to_cpu(super->dev_item.devid);
 	free(buffer);
 	return 0;
@@ -1692,49 +1674,57 @@ static int wait_for_worker(struct mdrestore_struct *mdres)
 	return ret;
 }
 
-static int read_chunk_block(struct mdrestore_struct *mdres, u8 *buffer,
-			    u64 bytenr, u64 item_bytenr, u32 bufsize,
-			    u64 cluster_bytenr)
+/*
+ * Check if a range [start, start + len] has ANY bytes covered by system chunk
+ * ranges.
+ */
+static bool is_in_sys_chunks(struct mdrestore_struct *mdres, u64 start, u64 len)
 {
-	struct extent_buffer *eb;
-	int ret = 0;
+	struct rb_node *node = mdres->sys_chunks.root.rb_node;
+	struct cache_extent *entry;
+	struct cache_extent *next;
+	struct cache_extent *prev;
+
+	if (start > mdres->sys_chunk_end)
+		return false;
+
+	while (node) {
+		entry = rb_entry(node, struct cache_extent, rb_node);
+		if (start > entry->start) {
+			if (!node->rb_right)
+				break;
+			node = node->rb_right;
+		} else if (start < entry->start) {
+			if (!node->rb_left)
+				break;
+			node = node->rb_left;
+		} else {
+			/* Already in a system chunk */
+			return true;
+		}
+	}
+	if (!node)
+		return false;
+	entry = rb_entry(node, struct cache_extent, rb_node);
+	/* Now we have entry which is the nearst chunk around @start */
+	if (start > entry->start) {
+		prev = entry;
+		next = next_cache_extent(entry);
+	} else {
+		prev = prev_cache_extent(entry);
+		next = entry;
+	}
+	if (prev && prev->start + prev->size > start)
+		return true;
+	if (next && start + len > next->start)
+		return true;
+	return false;
+}
+
+static int read_chunk_tree_block(struct mdrestore_struct *mdres,
+				 struct extent_buffer *eb)
+{
 	int i;
-
-	eb = alloc_dummy_eb(bytenr, mdres->nodesize);
-	if (!eb) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	while (item_bytenr != bytenr) {
-		buffer += mdres->nodesize;
-		item_bytenr += mdres->nodesize;
-	}
-
-	memcpy(eb->data, buffer, mdres->nodesize);
-	if (btrfs_header_bytenr(eb) != bytenr) {
-		error("eb bytenr does not match found bytenr: %llu != %llu",
-				(unsigned long long)btrfs_header_bytenr(eb),
-				(unsigned long long)bytenr);
-		ret = -EIO;
-		goto out;
-	}
-
-	if (memcmp(mdres->fsid, eb->data + offsetof(struct btrfs_header, fsid),
-		   BTRFS_FSID_SIZE)) {
-		error("filesystem UUID of eb %llu does not match",
-				(unsigned long long)bytenr);
-		ret = -EIO;
-		goto out;
-	}
-
-	if (btrfs_header_owner(eb) != BTRFS_CHUNK_TREE_OBJECTID) {
-		error("wrong eb %llu owner %llu",
-				(unsigned long long)bytenr,
-				(unsigned long long)btrfs_header_owner(eb));
-		ret = -EIO;
-		goto out;
-	}
 
 	for (i = 0; i < btrfs_header_nritems(eb); i++) {
 		struct btrfs_chunk *chunk;
@@ -1742,17 +1732,6 @@ static int read_chunk_block(struct mdrestore_struct *mdres, u8 *buffer,
 		struct btrfs_key key;
 		u64 type;
 
-		if (btrfs_header_level(eb)) {
-			u64 blockptr = btrfs_node_blockptr(eb, i);
-
-			ret = search_for_chunk_blocks(mdres, blockptr,
-						      cluster_bytenr);
-			if (ret)
-				break;
-			continue;
-		}
-
-		/* Yay a leaf!  We loves leafs! */
 		btrfs_item_key_to_cpu(eb, &key, i);
 		if (key.type != BTRFS_CHUNK_ITEM_KEY)
 			continue;
@@ -1760,8 +1739,7 @@ static int read_chunk_block(struct mdrestore_struct *mdres, u8 *buffer,
 		fs_chunk = malloc(sizeof(struct fs_chunk));
 		if (!fs_chunk) {
 			error("not enough memory to allocate chunk");
-			ret = -ENOMEM;
-			break;
+			return -ENOMEM;
 		}
 		memset(fs_chunk, 0, sizeof(*fs_chunk));
 		chunk = btrfs_item_ptr(eb, i, struct btrfs_chunk);
@@ -1770,19 +1748,18 @@ static int read_chunk_block(struct mdrestore_struct *mdres, u8 *buffer,
 		fs_chunk->physical = btrfs_stripe_offset_nr(eb, chunk, 0);
 		fs_chunk->bytes = btrfs_chunk_length(eb, chunk);
 		INIT_LIST_HEAD(&fs_chunk->list);
+
 		if (tree_search(&mdres->physical_tree, &fs_chunk->p,
 				physical_cmp, 1) != NULL)
 			list_add(&fs_chunk->list, &mdres->overlapping_chunks);
 		else
 			tree_insert(&mdres->physical_tree, &fs_chunk->p,
 				    physical_cmp);
-
 		type = btrfs_chunk_type(eb, chunk);
 		if (type & BTRFS_BLOCK_GROUP_DUP) {
 			fs_chunk->physical_dup =
 					btrfs_stripe_offset_nr(eb, chunk, 1);
 		}
-
 		if (fs_chunk->physical_dup + fs_chunk->bytes >
 		    mdres->last_physical_offset)
 			mdres->last_physical_offset = fs_chunk->physical_dup +
@@ -1797,19 +1774,79 @@ static int read_chunk_block(struct mdrestore_struct *mdres, u8 *buffer,
 			mdres->alloced_chunks += fs_chunk->bytes;
 		tree_insert(&mdres->chunk_tree, &fs_chunk->l, chunk_cmp);
 	}
-out:
+	return 0;
+}
+
+static int read_chunk_block(struct mdrestore_struct *mdres, u8 *buffer,
+			    u64 item_bytenr, u32 bufsize,
+			    u64 cluster_bytenr)
+{
+	struct extent_buffer *eb;
+	u32 nodesize = mdres->nodesize;
+	u64 bytenr;
+	size_t cur_offset;
+	int ret = 0;
+
+	eb = alloc_dummy_eb(0, mdres->nodesize);
+	if (!eb)
+		return -ENOMEM;
+
+	for (cur_offset = 0; cur_offset < bufsize; cur_offset += nodesize) {
+		bytenr = item_bytenr + cur_offset;
+		if (!is_in_sys_chunks(mdres, bytenr, nodesize))
+			continue;
+		memcpy(eb->data, buffer + cur_offset, nodesize);
+		if (btrfs_header_bytenr(eb) != bytenr) {
+			error(
+			"eb bytenr does not match found bytenr: %llu != %llu",
+				(unsigned long long)btrfs_header_bytenr(eb),
+				(unsigned long long)bytenr);
+			ret = -EUCLEAN;
+			break;
+		}
+		if (memcmp(mdres->fsid, eb->data +
+			   offsetof(struct btrfs_header, fsid),
+			   BTRFS_FSID_SIZE)) {
+			error(
+			"filesystem metadata UUID of eb %llu does not match",
+				bytenr);
+			ret = -EUCLEAN;
+			break;
+		}
+		if (btrfs_header_owner(eb) != BTRFS_CHUNK_TREE_OBJECTID) {
+			error("wrong eb %llu owner %llu",
+				(unsigned long long)bytenr,
+				(unsigned long long)btrfs_header_owner(eb));
+			ret = -EUCLEAN;
+			break;
+		}
+		/*
+		 * No need to search node, as we will iterate all tree blocks
+		 * in chunk tree, only need to bother leaves.
+		 */
+		if (btrfs_header_level(eb))
+			continue;
+		ret = read_chunk_tree_block(mdres, eb);
+		if (ret < 0)
+			break;
+	}
 	free(eb);
 	return ret;
 }
 
-/* If you have to ask you aren't worthy */
-static int search_for_chunk_blocks(struct mdrestore_struct *mdres,
-				   u64 search, u64 cluster_bytenr)
+/*
+ * This function will try to find all chunk items in the dump image.
+ *
+ * This function will iterate all clusters, and find any item inside system
+ * chunk ranges.  For such item, it will try to read them as tree blocks, and
+ * find CHUNK_ITEMs, add them to @mdres.
+ */
+static int search_for_chunk_blocks(struct mdrestore_struct *mdres)
 {
 	struct meta_cluster *cluster;
 	struct meta_cluster_header *header;
 	struct meta_cluster_item *item;
-	u64 current_cluster = cluster_bytenr, bytenr;
+	u64 current_cluster = 0, bytenr;
 	u64 item_bytenr;
 	u32 bufsize, nritems, i;
 	u32 max_size = MAX_PENDING_SIZE * 2;
@@ -1840,30 +1877,27 @@ static int search_for_chunk_blocks(struct mdrestore_struct *mdres,
 	}
 
 	bytenr = current_cluster;
+	/* Main loop, iterating all clusters */
 	while (1) {
 		if (fseek(mdres->in, current_cluster, SEEK_SET)) {
 			error("seek failed: %m");
 			ret = -EIO;
-			break;
+			goto out;
 		}
 
 		ret = fread(cluster, BLOCK_SIZE, 1, mdres->in);
 		if (ret == 0) {
-			if (cluster_bytenr != 0) {
-				cluster_bytenr = 0;
-				current_cluster = 0;
-				bytenr = 0;
-				continue;
-			}
+			if (feof(mdres->in))
+				goto out;
 			error(
 	"unknown state after reading cluster at %llu, probably corrupted data",
-					cluster_bytenr);
+					current_cluster);
 			ret = -EIO;
-			break;
+			goto out;
 		} else if (ret < 0) {
 			error("unable to read image at %llu: %m",
-					(unsigned long long)cluster_bytenr);
-			break;
+					current_cluster);
+			goto out;
 		}
 		ret = 0;
 
@@ -1872,11 +1906,17 @@ static int search_for_chunk_blocks(struct mdrestore_struct *mdres,
 		    le64_to_cpu(header->bytenr) != current_cluster) {
 			error("bad header in metadump image");
 			ret = -EIO;
-			break;
+			goto out;
 		}
+
+		/* We're already over the system chunk end, no need to search*/
+		if (current_cluster > mdres->sys_chunk_end)
+			goto out;
 
 		bytenr += BLOCK_SIZE;
 		nritems = le32_to_cpu(header->nritems);
+
+		/* Search items for tree blocks in sys chunks */
 		for (i = 0; i < nritems; i++) {
 			size_t size;
 
@@ -1884,11 +1924,22 @@ static int search_for_chunk_blocks(struct mdrestore_struct *mdres,
 			bufsize = le32_to_cpu(item->size);
 			item_bytenr = le64_to_cpu(item->bytenr);
 
-			if (bufsize > max_size) {
-				error("item %u too big: %u > %u", i, bufsize,
-						max_size);
-				ret = -EIO;
-				break;
+			/*
+			 * Only data extent/free space cache can be that big,
+			 * adjacent tree blocks won't be able to be merged
+			 * beyond max_size.  Also, we can skip super block.
+			 */
+			if (bufsize > max_size ||
+			    !is_in_sys_chunks(mdres, item_bytenr, bufsize) ||
+			    item_bytenr == BTRFS_SUPER_INFO_OFFSET) {
+				ret = fseek(mdres->in, bufsize, SEEK_CUR);
+				if (ret < 0) {
+					error("failed to seek: %m");
+					ret = -errno;
+					goto out;
+				}
+				bytenr += bufsize;
+				continue;
 			}
 
 			if (mdres->compress_method == COMPRESS_ZLIB) {
@@ -1896,7 +1947,7 @@ static int search_for_chunk_blocks(struct mdrestore_struct *mdres,
 				if (ret != 1) {
 					error("read error: %m");
 					ret = -EIO;
-					break;
+					goto out;
 				}
 
 				size = max_size;
@@ -1907,44 +1958,124 @@ static int search_for_chunk_blocks(struct mdrestore_struct *mdres,
 					error("decompression failed with %d",
 							ret);
 					ret = -EIO;
-					break;
+					goto out;
 				}
 			} else {
 				ret = fread(buffer, bufsize, 1, mdres->in);
 				if (ret != 1) {
 					error("read error: %m");
 					ret = -EIO;
-					break;
+					goto out;
 				}
 				size = bufsize;
 			}
 			ret = 0;
 
-			if (item_bytenr <= search &&
-			    item_bytenr + size > search) {
-				ret = read_chunk_block(mdres, buffer, search,
-						       item_bytenr, size,
-						       current_cluster);
-				if (!ret)
-					ret = 1;
-				break;
+			ret = read_chunk_block(mdres, buffer, item_bytenr, size,
+					       current_cluster);
+			if (ret < 0) {
+				error(
+			"failed to search tree blocks in item bytenr %llu size %lu",
+					item_bytenr, size);
+				goto out;
 			}
 			bytenr += bufsize;
-		}
-		if (ret) {
-			if (ret > 0)
-				ret = 0;
-			break;
 		}
 		if (bytenr & BLOCK_MASK)
 			bytenr += BLOCK_SIZE - (bytenr & BLOCK_MASK);
 		current_cluster = bytenr;
 	}
 
+out:
 	free(tmp);
 	free(buffer);
 	free(cluster);
 	return ret;
+}
+
+/*
+ * Add system chunks in super blocks into mdres->sys_chunks, so later we can
+ * determine if an item is a chunk tree block.
+ */
+static int add_sys_array(struct mdrestore_struct *mdres,
+			 struct btrfs_super_block *sb)
+{
+	struct btrfs_disk_key *disk_key;
+	struct btrfs_key key;
+	struct btrfs_chunk *chunk;
+	struct cache_extent *cache;
+	u32 cur_offset;
+	u32 len = 0;
+	u32 array_size;
+	u8 *array_ptr;
+	int ret = 0;
+
+	array_size = btrfs_super_sys_array_size(sb);
+	array_ptr = sb->sys_chunk_array;
+	cur_offset = 0;
+
+	while (cur_offset < array_size) {
+		u32 num_stripes;
+
+		disk_key = (struct btrfs_disk_key *)array_ptr;
+		len = sizeof(*disk_key);
+		if (cur_offset + len > array_size)
+			goto out_short_read;
+		btrfs_disk_key_to_cpu(&key, disk_key);
+
+		array_ptr += len;
+		cur_offset += len;
+
+		if (key.type != BTRFS_CHUNK_ITEM_KEY) {
+			error("unexpected item type %u in sys_array offset %u",
+			      key.type, cur_offset);
+			ret = -EUCLEAN;
+			break;
+		}
+		chunk = (struct btrfs_chunk *)array_ptr;
+
+		/*
+		 * At least one btrfs_chunk with one stripe must be present,
+		 * exact stripe count check comes afterwards
+		 */
+		len = btrfs_chunk_item_size(1);
+		if (cur_offset + len > array_size)
+			goto out_short_read;
+		num_stripes = btrfs_stack_chunk_num_stripes(chunk);
+		if (!num_stripes) {
+			error(
+			"invalid number of stripes %u in sys_array at offset %u",
+				num_stripes, cur_offset);
+			ret = -EIO;
+			break;
+		}
+		len = btrfs_chunk_item_size(num_stripes);
+		if (cur_offset + len > array_size)
+			goto out_short_read;
+		if (btrfs_stack_chunk_type(chunk) &
+		    BTRFS_BLOCK_GROUP_SYSTEM) {
+			ret = add_merge_cache_extent(&mdres->sys_chunks,
+				key.offset,
+				btrfs_stack_chunk_length(chunk));
+			if (ret < 0)
+				break;
+		}
+		array_ptr += len;
+		cur_offset += len;
+	}
+
+	/* Get the last system chunk end as a quicker check */
+	cache = last_cache_extent(&mdres->sys_chunks);
+	if (!cache) {
+		error("no system chunk found in super block");
+		return -EUCLEAN;
+	}
+	mdres->sys_chunk_end = cache->start + cache->size - 1;
+	return ret;
+out_short_read:
+	error("sys_array too short to read %u bytes at offset %u",
+		len, cur_offset);
+	return -EUCLEAN;
 }
 
 static int build_chunk_tree(struct mdrestore_struct *mdres,
@@ -1953,7 +2084,6 @@ static int build_chunk_tree(struct mdrestore_struct *mdres,
 	struct btrfs_super_block *super;
 	struct meta_cluster_header *header;
 	struct meta_cluster_item *item = NULL;
-	u64 chunk_root_bytenr = 0;
 	u32 i, nritems;
 	u64 bytenr = 0;
 	u8 *buffer;
@@ -2012,10 +2142,10 @@ static int build_chunk_tree(struct mdrestore_struct *mdres,
 	}
 
 	if (mdres->compress_method == COMPRESS_ZLIB) {
-		size_t size = MAX_PENDING_SIZE * 2;
+		size_t size = BTRFS_SUPER_INFO_SIZE;
 		u8 *tmp;
 
-		tmp = malloc(MAX_PENDING_SIZE * 2);
+		tmp = malloc(size);
 		if (!tmp) {
 			free(buffer);
 			return -ENOMEM;
@@ -2034,16 +2164,31 @@ static int build_chunk_tree(struct mdrestore_struct *mdres,
 
 	pthread_mutex_lock(&mdres->mutex);
 	super = (struct btrfs_super_block *)buffer;
-	chunk_root_bytenr = btrfs_super_chunk_root(super);
+	ret = btrfs_check_super(super, 0);
+	if (ret < 0) {
+		error("invalid superblock");
+		return ret;
+	}
+	ret = add_sys_array(mdres, super);
+	if (ret < 0) {
+		error("failed to read system chunk array");
+		free(buffer);
+		pthread_mutex_unlock(&mdres->mutex);
+		return ret;
+	}
 	mdres->nodesize = btrfs_super_nodesize(super);
-	memcpy(mdres->fsid, super->fsid, BTRFS_FSID_SIZE);
-	memcpy(mdres->uuid, super->dev_item.uuid,
-		       BTRFS_UUID_SIZE);
+	if (btrfs_super_incompat_flags(super) &
+	    BTRFS_FEATURE_INCOMPAT_METADATA_UUID)
+		memcpy(mdres->fsid, super->metadata_uuid, BTRFS_FSID_SIZE);
+	else
+		memcpy(mdres->fsid, super->fsid, BTRFS_FSID_SIZE);
+
+	memcpy(mdres->uuid, super->dev_item.uuid, BTRFS_UUID_SIZE);
 	mdres->devid = le64_to_cpu(super->dev_item.devid);
 	free(buffer);
 	pthread_mutex_unlock(&mdres->mutex);
 
-	return search_for_chunk_blocks(mdres, chunk_root_bytenr, 0);
+	return search_for_chunk_blocks(mdres);
 }
 
 static int range_contains_super(u64 physical, u64 bytes)
@@ -2081,42 +2226,86 @@ static void remap_overlapping_chunks(struct mdrestore_struct *mdres)
 	}
 }
 
-static int fixup_devices(struct btrfs_fs_info *fs_info,
-			 struct mdrestore_struct *mdres, off_t dev_size)
+static int fixup_device_size(struct btrfs_trans_handle *trans,
+			     struct mdrestore_struct *mdres, int out_fd)
 {
-	struct btrfs_trans_handle *trans;
+	struct btrfs_fs_info *fs_info = trans->fs_info;
 	struct btrfs_dev_item *dev_item;
+	struct btrfs_dev_extent *dev_ext;
 	struct btrfs_path path;
 	struct extent_buffer *leaf;
 	struct btrfs_root *root = fs_info->chunk_root;
 	struct btrfs_key key;
+	struct stat buf;
 	u64 devid, cur_devid;
+	u64 dev_size; /* Get from last dev extents */
 	int ret;
-
-	trans = btrfs_start_transaction(fs_info->tree_root, 1);
-	if (IS_ERR(trans)) {
-		error("cannot starting transaction %ld", PTR_ERR(trans));
-		return PTR_ERR(trans);
-	}
 
 	dev_item = &fs_info->super_copy->dev_item;
 
+	btrfs_init_path(&path);
 	devid = btrfs_stack_device_id(dev_item);
+
+	key.objectid = devid;
+	key.type = BTRFS_DEV_EXTENT_KEY;
+	key.offset = (u64)-1;
+
+	ret = btrfs_search_slot(NULL, fs_info->dev_root, &key, &path, 0, 0);
+	if (ret < 0) {
+		errno = -ret;
+		error("failed to locate last dev extent of devid %llu: %m",
+			devid);
+		btrfs_release_path(&path);
+		return ret;
+	}
+	if (ret == 0) {
+		error("found invalid dev extent devid %llu offset -1", devid);
+		btrfs_release_path(&path);
+		return -EUCLEAN;
+	}
+	ret = btrfs_previous_item(fs_info->dev_root, &path, devid,
+				  BTRFS_DEV_EXTENT_KEY);
+	if (ret > 0)
+		ret = -ENOENT;
+	if (ret < 0) {
+		errno = -ret;
+		error("failed to locate last dev extent of devid %llu: %m",
+			devid);
+		btrfs_release_path(&path);
+		return ret;
+	}
+
+	btrfs_item_key_to_cpu(path.nodes[0], &key, path.slots[0]);
+	dev_ext = btrfs_item_ptr(path.nodes[0], path.slots[0],
+				 struct btrfs_dev_extent);
+	dev_size = key.offset + btrfs_dev_extent_length(path.nodes[0], dev_ext);
+	btrfs_release_path(&path);
 
 	btrfs_set_stack_device_total_bytes(dev_item, dev_size);
 	btrfs_set_stack_device_bytes_used(dev_item, mdres->alloced_chunks);
+	ret = fstat(out_fd, &buf);
+	if (ret < 0) {
+		error("failed to stat result image: %m");
+		return -errno;
+	}
+	if (S_ISREG(buf.st_mode)) {
+		/* Don't forget to enlarge the real file */
+		ret = ftruncate64(out_fd, dev_size);
+		if (ret < 0) {
+			error("failed to enlarge result image: %m");
+			return -errno;
+		}
+	}
 
 	key.objectid = BTRFS_DEV_ITEMS_OBJECTID;
 	key.type = BTRFS_DEV_ITEM_KEY;
 	key.offset = 0;
 
-	btrfs_init_path(&path);
-
 again:
 	ret = btrfs_search_slot(trans, root, &key, &path, -1, 1);
 	if (ret < 0) {
 		error("search failed: %d", ret);
-		exit(1);
+		return ret;
 	}
 
 	while (1) {
@@ -2163,12 +2352,255 @@ again:
 	}
 
 	btrfs_release_path(&path);
+	return 0;
+}
+
+static void fixup_block_groups(struct btrfs_trans_handle *trans)
+{
+	struct btrfs_fs_info *fs_info = trans->fs_info;
+	struct btrfs_block_group *bg;
+	struct btrfs_mapping_tree *map_tree = &fs_info->mapping_tree;
+	struct cache_extent *ce;
+	struct map_lookup *map;
+	u64 extra_flags;
+
+	for (ce = search_cache_extent(&map_tree->cache_tree, 0); ce;
+	     ce = next_cache_extent(ce)) {
+		map = container_of(ce, struct map_lookup, ce);
+
+		bg = btrfs_lookup_block_group(fs_info, ce->start);
+		if (!bg) {
+			warning(
+		"cannot find block group %llu, filesystem may not be mountable",
+				ce->start);
+			continue;
+		}
+		extra_flags = map->type & BTRFS_BLOCK_GROUP_PROFILE_MASK;
+
+		if (bg->flags == map->type)
+			continue;
+
+		/* Update the block group item and mark the bg dirty */
+		bg->flags = map->type;
+		if (list_empty(&bg->dirty_list))
+			list_add_tail(&bg->dirty_list, &trans->dirty_bgs);
+		/*
+		 * Chunk and bg flags can be different, changing bg flags
+		 * without update avail_data/meta_alloc_bits will lead to
+		 * ENOSPC.
+		 * So here we set avail_*_alloc_bits to match chunk types.
+		 */
+		if (map->type & BTRFS_BLOCK_GROUP_DATA)
+			fs_info->avail_data_alloc_bits = extra_flags;
+		if (map->type & BTRFS_BLOCK_GROUP_METADATA)
+			fs_info->avail_metadata_alloc_bits = extra_flags;
+		if (map->type & BTRFS_BLOCK_GROUP_SYSTEM)
+			fs_info->avail_system_alloc_bits = extra_flags;
+	}
+}
+
+static int remove_all_dev_extents(struct btrfs_trans_handle *trans)
+{
+	struct btrfs_fs_info *fs_info = trans->fs_info;
+	struct btrfs_root *root = fs_info->dev_root;
+	struct btrfs_path path;
+	struct btrfs_key key;
+	struct extent_buffer *leaf;
+	int slot;
+	int ret;
+
+	key.objectid = 1;
+	key.type = BTRFS_DEV_EXTENT_KEY;
+	key.offset = 0;
+	btrfs_init_path(&path);
+
+	ret = btrfs_search_slot(trans, root, &key, &path, -1, 1);
+	if (ret < 0) {
+		errno = -ret;
+		error("failed to search dev tree: %m");
+		return ret;
+	}
+
+	while (1) {
+		slot = path.slots[0];
+		leaf = path.nodes[0];
+		if (slot >= btrfs_header_nritems(leaf)) {
+			ret = btrfs_next_leaf(root, &path);
+			if (ret < 0) {
+				errno = -ret;
+				error("failed to search dev tree: %m");
+				goto out;
+			}
+			if (ret > 0) {
+				ret = 0;
+				goto out;
+			}
+		}
+
+		btrfs_item_key_to_cpu(leaf, &key, slot);
+		if (key.type != BTRFS_DEV_EXTENT_KEY)
+			break;
+		ret = btrfs_del_item(trans, root, &path);
+		if (ret < 0) {
+			errno = -ret;
+			error("failed to delete dev extent %llu, %llu: %m",
+				key.objectid, key.offset);
+			goto out;
+		}
+	}
+out:
+	btrfs_release_path(&path);
+	return ret;
+}
+
+static int fixup_dev_extents(struct btrfs_trans_handle *trans)
+{
+	struct btrfs_fs_info *fs_info = trans->fs_info;
+	struct btrfs_mapping_tree *map_tree = &fs_info->mapping_tree;
+	struct btrfs_device *dev;
+	struct cache_extent *ce;
+	struct map_lookup *map;
+	u64 devid = btrfs_stack_device_id(&fs_info->super_copy->dev_item);
+	int i;
+	int ret;
+
+	ret = remove_all_dev_extents(trans);
+	if (ret < 0) {
+		errno = -ret;
+		error("failed to remove all existing dev extents: %m");
+	}
+
+	dev = btrfs_find_device(fs_info, devid, NULL, NULL);
+	if (!dev) {
+		error("failed to find devid %llu", devid);
+		return -ENODEV;
+	}
+
+	/* Rebuild all dev extents using chunk maps */
+	for (ce = search_cache_extent(&map_tree->cache_tree, 0); ce;
+	     ce = next_cache_extent(ce)) {
+		u64 stripe_len;
+
+		map = container_of(ce, struct map_lookup, ce);
+		stripe_len = calc_stripe_length(map->type, ce->size,
+						map->num_stripes);
+		for (i = 0; i < map->num_stripes; i++) {
+			ret = btrfs_insert_dev_extent(trans, dev, ce->start,
+					stripe_len, map->stripes[i].physical);
+			if (ret < 0) {
+				errno = -ret;
+				error(
+				"failed to insert dev extent %llu %llu: %m",
+					devid, map->stripes[i].physical);
+				goto out;
+			}
+		}
+	}
+out:
+	return ret;
+}
+
+static int iter_tree_blocks(struct btrfs_fs_info *fs_info,
+			    struct extent_buffer *eb, bool pin)
+{
+	void (*func)(struct btrfs_fs_info *fs_info, u64 bytenr, u64 num_bytes);
+	int nritems;
+	int level;
+	int i;
+	int ret;
+
+	if (pin)
+		func = btrfs_pin_extent;
+	else
+		func = btrfs_unpin_extent;
+
+	func(fs_info, eb->start, eb->len);
+
+	level = btrfs_header_level(eb);
+	nritems = btrfs_header_nritems(eb);
+	if (level == 0)
+		return 0;
+
+	for (i = 0; i < nritems; i++) {
+		u64 bytenr;
+		struct extent_buffer *tmp;
+
+		if (level == 0) {
+			struct btrfs_root_item *ri;
+			struct btrfs_key key;
+
+			btrfs_item_key_to_cpu(eb, &key, i);
+			if (key.type != BTRFS_ROOT_ITEM_KEY)
+				continue;
+			ri = btrfs_item_ptr(eb, i, struct btrfs_root_item);
+			bytenr = btrfs_disk_root_bytenr(eb, ri);
+			tmp = read_tree_block(fs_info, bytenr, 0);
+			if (!extent_buffer_uptodate(tmp)) {
+				error("unable to read log root block");
+				return -EIO;
+			}
+			ret = iter_tree_blocks(fs_info, tmp, pin);
+			free_extent_buffer(tmp);
+			if (ret)
+				return ret;
+		} else {
+			bytenr = btrfs_node_blockptr(eb, i);
+			tmp = read_tree_block(fs_info, bytenr, 0);
+			if (!extent_buffer_uptodate(tmp)) {
+				error("unable to read log root block");
+				return -EIO;
+			}
+			ret = iter_tree_blocks(fs_info, tmp, pin);
+			free_extent_buffer(tmp);
+			if (ret)
+				return ret;
+		}
+	}
+
+	return 0;
+}
+
+static int fixup_chunks_and_devices(struct btrfs_fs_info *fs_info,
+			 struct mdrestore_struct *mdres, int out_fd)
+{
+	struct btrfs_trans_handle *trans;
+	int ret;
+
+	if (btrfs_super_log_root(fs_info->super_copy)) {
+		warning(
+		"log tree detected, its generation will not match superblock");
+	}
+	trans = btrfs_start_transaction(fs_info->tree_root, 1);
+	if (IS_ERR(trans)) {
+		error("cannot start transaction %ld", PTR_ERR(trans));
+		return PTR_ERR(trans);
+	}
+
+	if (btrfs_super_log_root(fs_info->super_copy) && fs_info->log_root_tree)
+		iter_tree_blocks(fs_info, fs_info->log_root_tree->node, true);
+	fixup_block_groups(trans);
+	ret = fixup_dev_extents(trans);
+	if (ret < 0)
+		goto error;
+
+	ret = fixup_device_size(trans, mdres, out_fd);
+	if (ret < 0)
+		goto error;
+
 	ret = btrfs_commit_transaction(trans, fs_info->tree_root);
 	if (ret) {
 		error("unable to commit transaction: %d", ret);
 		return ret;
 	}
+	if (btrfs_super_log_root(fs_info->super_copy) && fs_info->log_root_tree)
+		iter_tree_blocks(fs_info, fs_info->log_root_tree->node, false);
 	return 0;
+error:
+	errno = -ret;
+	error(
+"failed to fix chunks and devices mapping, the fs may not be mountable: %m");
+	btrfs_abort_transaction(trans, ret);
+	return ret;
 }
 
 static int restore_metadump(const char *input, FILE *out, int old_restore,
@@ -2222,8 +2654,10 @@ static int restore_metadump(const char *input, FILE *out, int old_restore,
 
 	if (!multi_devices && !old_restore) {
 		ret = build_chunk_tree(&mdrestore, cluster);
-		if (ret)
+		if (ret) {
+			error("failed to build chunk tree");
 			goto out;
+		}
 		if (!list_empty(&mdrestore.overlapping_chunks))
 			remap_overlapping_chunks(&mdrestore);
 	}
@@ -2253,7 +2687,8 @@ static int restore_metadump(const char *input, FILE *out, int old_restore,
 	}
 	ret = wait_for_worker(&mdrestore);
 
-	if (!ret && !multi_devices && !old_restore) {
+	if (!ret && !multi_devices && !old_restore &&
+	    btrfs_super_num_devices(mdrestore.original_super) != 1) {
 		struct btrfs_root *root;
 		struct stat st;
 
@@ -2275,7 +2710,7 @@ static int restore_metadump(const char *input, FILE *out, int old_restore,
 			return 1;
 		}
 
-		ret = fixup_devices(info, &mdrestore, st.st_size);
+		ret = fixup_chunks_and_devices(info, &mdrestore, fileno(out));
 		close_ctree(info->chunk_root);
 		if (ret)
 			goto out;
@@ -2314,7 +2749,7 @@ static int update_disk_super_on_device(struct btrfs_fs_info *info,
 	key.offset = cur_devid;
 
 	btrfs_init_path(&path);
-	ret = btrfs_search_slot(NULL, info->chunk_root, &key, &path, 0, 0); 
+	ret = btrfs_search_slot(NULL, info->chunk_root, &key, &path, 0, 0);
 	if (ret) {
 		error("search key failed: %d", ret);
 		ret = -EIO;
@@ -2373,10 +2808,12 @@ static int update_disk_super_on_device(struct btrfs_fs_info *info,
 
 	ret = pwrite64(fp, buf, BTRFS_SUPER_INFO_SIZE, BTRFS_SUPER_INFO_OFFSET);
 	if (ret != BTRFS_SUPER_INFO_SIZE) {
-		if (ret < 0)
-			error("cannot write superblock: %s", strerror(ret));
-		else
+		if (ret < 0) {
+			errno = ret;
+			error("cannot write superblock: %m");
+		} else {
 			error("cannot write superblock");
+		}
 		ret = -EIO;
 		goto out;
 	}
@@ -2405,7 +2842,7 @@ static void print_usage(int ret)
 	exit(ret);
 }
 
-int main(int argc, char *argv[])
+int BOX_MAIN(image)(int argc, char *argv[])
 {
 	char *source;
 	char *target;
@@ -2466,7 +2903,7 @@ int main(int argc, char *argv[])
 			create = 0;
 			multi_devices = 1;
 			break;
-			case GETOPT_VAL_HELP:
+		case GETOPT_VAL_HELP:
 		default:
 			print_usage(c != GETOPT_VAL_HELP);
 		}
@@ -2487,7 +2924,7 @@ int main(int argc, char *argv[])
 	} else {
 		if (walk_trees || sanitize != SANITIZE_NONE || compress_level) {
 			error(
-			"useing -w, -s, -c options for restore makes no sense");
+			"using -w, -s, -c options for restore makes no sense");
 			usage_error++;
 		}
 		if (multi_devices && dev_cnt < 2) {
@@ -2522,6 +2959,7 @@ int main(int argc, char *argv[])
 
 			if (tmp <= 0)
 				tmp = 1;
+			tmp = min_t(long, tmp, MAX_WORKER_THREADS);
 			num_threads = tmp;
 		}
 	} else {
@@ -2531,8 +2969,8 @@ int main(int argc, char *argv[])
 	if (create) {
 		ret = check_mounted(source);
 		if (ret < 0) {
-			warning("unable to check mount status of: %s",
-					strerror(-ret));
+			errno = -ret;
+			warning("unable to check mount status of: %m");
 		} else if (ret) {
 			warning("%s already mounted, results may be inaccurate",
 					source);
@@ -2545,7 +2983,7 @@ int main(int argc, char *argv[])
 				       0, target, multi_devices);
 	}
 	if (ret) {
-		error("%s failed: %m", (create) ? "create" : "restore");
+		error("%s failed: %d", (create) ? "create" : "restore", ret);
 		goto out;
 	}
 

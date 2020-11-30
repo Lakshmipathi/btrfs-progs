@@ -4,6 +4,7 @@
 source "$TEST_TOP/common"
 
 check_prereq mkfs.btrfs
+check_dm_target_support linear
 
 setup_root_helper
 prepare_test_dev

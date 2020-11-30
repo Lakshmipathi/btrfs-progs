@@ -23,10 +23,20 @@
 #define __BTRFS_MKFS_COMMON_H__
 
 #include "kerncompat.h"
-#include "common-defs.h"
+#include "common/defs.h"
 
 #define BTRFS_MKFS_SYSTEM_GROUP_SIZE SZ_4M
 #define BTRFS_MKFS_SMALL_VOLUME_SIZE SZ_1G
+
+/*
+ * Default settings for block group types
+ */
+#define BTRFS_MKFS_DEFAULT_DATA_ONE_DEVICE	0	/* SINGLE */
+#define BTRFS_MKFS_DEFAULT_META_ONE_DEVICE	BTRFS_BLOCK_GROUP_DUP
+#define BTRFS_MKFS_DEFAULT_META_ONE_DEVICE_SSD	0	/* SINGLE */
+
+#define BTRFS_MKFS_DEFAULT_DATA_MULTI_DEVICE	0	/* SINGLE */
+#define BTRFS_MKFS_DEFAULT_META_MULTI_DEVICE	BTRFS_BLOCK_GROUP_RAID1
 
 /*
  * Tree root blocks created during mkfs
@@ -53,6 +63,8 @@ struct btrfs_mkfs_config {
 	u64 features;
 	/* Size of the filesystem in bytes */
 	u64 num_bytes;
+	/* checksum algorithm to use */
+	enum btrfs_csum_type csum_type;
 
 	/* Output fields, set during creation */
 

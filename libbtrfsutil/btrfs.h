@@ -36,12 +36,14 @@ struct btrfs_ioctl_vol_args {
 #define BTRFS_DEVICE_PATH_NAME_MAX 1024
 
 #define BTRFS_DEVICE_SPEC_BY_ID		(1ULL << 3)
+#define BTRFS_SUBVOL_SPEC_BY_ID		(1ULL << 4)
 
 #define BTRFS_VOL_ARG_V2_FLAGS_SUPPORTED		\
 			(BTRFS_SUBVOL_CREATE_ASYNC |	\
 			BTRFS_SUBVOL_RDONLY |		\
 			BTRFS_SUBVOL_QGROUP_INHERIT |	\
-			BTRFS_DEVICE_SPEC_BY_ID)
+			BTRFS_DEVICE_SPEC_BY_ID |	\
+			BTRFS_SUBVOL_SPEC_BY_ID)
 
 #define BTRFS_FSID_SIZE 16
 #define BTRFS_UUID_SIZE 16
@@ -120,6 +122,7 @@ struct btrfs_ioctl_vol_args_v2 {
 	union {
 		char name[BTRFS_SUBVOL_NAME_MAX + 1];
 		__u64 devid;
+		__u64 subvolid;
 	};
 };
 
@@ -134,7 +137,7 @@ struct btrfs_scrub_progress {
 	__u64 tree_bytes_scrubbed;	/* # of tree bytes scrubbed */
 	__u64 read_errors;		/* # of read errors encountered (EIO) */
 	__u64 csum_errors;		/* # of failed csum checks */
-	__u64 verify_errors;		/* # of occurences, where the metadata
+	__u64 verify_errors;		/* # of occurrences, where the metadata
 					 * of a tree block did not match the
 					 * expected values, like generation or
 					 * logical */
@@ -154,7 +157,7 @@ struct btrfs_scrub_progress {
 	__u64 last_physical;		/* last physical address scrubbed. In
 					 * case a scrub was aborted, this can
 					 * be used to restart the scrub */
-	__u64 unverified_errors;	/* # of occurences where a read for a
+	__u64 unverified_errors;	/* # of occurrences where a read for a
 					 * full (64k) bio failed, but the re-
 					 * check succeeded for each 4k piece.
 					 * Intermittent error. */
@@ -421,6 +424,21 @@ struct btrfs_ioctl_ino_lookup_args {
 	char name[BTRFS_INO_LOOKUP_PATH_MAX];
 };
 
+#define BTRFS_INO_LOOKUP_USER_PATH_MAX	(4080 - BTRFS_VOL_NAME_MAX - 1)
+struct btrfs_ioctl_ino_lookup_user_args {
+	/* in, inode number containing the subvolume of 'subvolid' */
+	__u64 dirid;
+	/* in */
+	__u64 treeid;
+	/* out, name of the subvolume of 'treeid' */
+	char name[BTRFS_VOL_NAME_MAX + 1];
+	/*
+	 * out, constructed path from the directory with which the ioctl is
+	 * called to dirid
+	 */
+	char path[BTRFS_INO_LOOKUP_USER_PATH_MAX];
+};
+
 /* Search criteria for the btrfs SEARCH ioctl family. */
 struct btrfs_ioctl_search_key {
 	/*
@@ -609,10 +627,17 @@ struct btrfs_ioctl_ino_path_args {
 struct btrfs_ioctl_logical_ino_args {
 	__u64				logical;	/* in */
 	__u64				size;		/* in */
-	__u64				reserved[4];
+	__u64				reserved[3];
+	__u64				flags;		/* in */
 	/* struct btrfs_data_container	*inodes;	out   */
 	__u64				inodes;
 };
+
+/*
+ * Return every ref to the extent, not just those containing logical block.
+ * Requires logical == extent bytenr.
+ */
+#define BTRFS_LOGICAL_INO_ARGS_IGNORE_OFFSET    (1ULL << 0)
 
 enum btrfs_dev_stat_values {
 	/* disk I/O failure stats */
@@ -720,6 +745,82 @@ struct btrfs_ioctl_send_args {
 	__u64 reserved[4];		/* in */
 };
 
+/*
+ * Information about a fs tree root.
+ *
+ * All items are filled by the ioctl
+ */
+struct btrfs_ioctl_get_subvol_info_args {
+	/* Id of this subvolume */
+	__u64 treeid;
+
+	/* Name of this subvolume, used to get the real name at mount point */
+	char name[BTRFS_VOL_NAME_MAX + 1];
+
+	/*
+	 * Id of the subvolume which contains this subvolume.
+	 * Zero for top-level subvolume or a deleted subvolume.
+	 */
+	__u64 parent_id;
+
+	/*
+	 * Inode number of the directory which contains this subvolume.
+	 * Zero for top-level subvolume or a deleted subvolume
+	 */
+	__u64 dirid;
+
+	/* Latest transaction id of this subvolume */
+	__u64 generation;
+
+	/* Flags of this subvolume */
+	__u64 flags;
+
+	/* UUID of this subvolume */
+	__u8 uuid[BTRFS_UUID_SIZE];
+
+	/*
+	 * UUID of the subvolume of which this subvolume is a snapshot.
+	 * All zero for a non-snapshot subvolume.
+	 */
+	__u8 parent_uuid[BTRFS_UUID_SIZE];
+
+	/*
+	 * UUID of the subvolume from which this subvolume was received.
+	 * All zero for non-received subvolume.
+	 */
+	__u8 received_uuid[BTRFS_UUID_SIZE];
+
+	/* Transaction id indicating when change/create/send/receive happened */
+	__u64 ctransid;
+	__u64 otransid;
+	__u64 stransid;
+	__u64 rtransid;
+	/* Time corresponding to c/o/s/rtransid */
+	struct btrfs_ioctl_timespec ctime;
+	struct btrfs_ioctl_timespec otime;
+	struct btrfs_ioctl_timespec stime;
+	struct btrfs_ioctl_timespec rtime;
+
+	/* Must be zero */
+	__u64 reserved[8];
+};
+
+#define BTRFS_MAX_ROOTREF_BUFFER_NUM			255
+struct btrfs_ioctl_get_subvol_rootref_args {
+	/* in/out, minimum id of rootref's treeid to be searched */
+	__u64 min_treeid;
+
+	/* out */
+	struct {
+		__u64 treeid;
+		__u64 dirid;
+	} rootref[BTRFS_MAX_ROOTREF_BUFFER_NUM];
+
+	/* out, number of found items */
+	__u8 num_items;
+	__u8 align[7];
+};
+
 /* Error codes as returned by the kernel */
 enum btrfs_err_code {
 	BTRFS_ERROR_DEV_RAID1_MIN_NOT_MET = 1,
@@ -729,7 +830,9 @@ enum btrfs_err_code {
 	BTRFS_ERROR_DEV_TGT_REPLACE,
 	BTRFS_ERROR_DEV_MISSING_NOT_FOUND,
 	BTRFS_ERROR_DEV_ONLY_WRITABLE,
-	BTRFS_ERROR_DEV_EXCL_RUN_IN_PROGRESS
+	BTRFS_ERROR_DEV_EXCL_RUN_IN_PROGRESS,
+	BTRFS_ERROR_DEV_RAID1C3_MIN_NOT_MET,
+	BTRFS_ERROR_DEV_RAID1C4_MIN_NOT_MET,
 };
 
 #define BTRFS_IOC_SNAP_CREATE _IOW(BTRFS_IOCTL_MAGIC, 1, \
@@ -836,5 +939,15 @@ enum btrfs_err_code {
 				   struct btrfs_ioctl_feature_flags[3])
 #define BTRFS_IOC_RM_DEV_V2 _IOW(BTRFS_IOCTL_MAGIC, 58, \
 				   struct btrfs_ioctl_vol_args_v2)
+#define BTRFS_IOC_LOGICAL_INO_V2 _IOWR(BTRFS_IOCTL_MAGIC, 59, \
+                                     struct btrfs_ioctl_logical_ino_args)
+#define BTRFS_IOC_GET_SUBVOL_INFO _IOR(BTRFS_IOCTL_MAGIC, 60, \
+				struct btrfs_ioctl_get_subvol_info_args)
+#define BTRFS_IOC_GET_SUBVOL_ROOTREF _IOWR(BTRFS_IOCTL_MAGIC, 61, \
+				struct btrfs_ioctl_get_subvol_rootref_args)
+#define BTRFS_IOC_INO_LOOKUP_USER _IOWR(BTRFS_IOCTL_MAGIC, 62, \
+				struct btrfs_ioctl_ino_lookup_user_args)
+#define BTRFS_IOC_SNAP_DESTROY_V2 _IOW(BTRFS_IOCTL_MAGIC, 63, \
+				struct btrfs_ioctl_vol_args_v2)
 
 #endif /* _LINUX_BTRFS_H */

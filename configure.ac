@@ -7,10 +7,22 @@ if test "x$PACKAGE_URL" = "x"; then
 	AC_DEFINE([PACKAGE_URL], ["http://btrfs.wiki.kernel.org"], [URL])
 fi
 
-dnl library version
+dnl Package version
+BTRFS_VERSION_PLAIN=`cat VERSION`
+BTRFS_VERSION_PLAIN="${BTRFS_VERSION_PLAIN#v*}"
+BTRFS_VERSION_MAJOR=`echo "${BTRFS_VERSION_PLAIN#v*}" | awk -F. '{print $1}'`
+BTRFS_VERSION_MINOR=`echo "${BTRFS_VERSION_PLAIN#v*}" | awk -F. '{print $2}'`
+BTRFS_VERSION_PATCHLEVEL=`echo "${BTRFS_VERSION_PLAIN#v*}" | awk -F. '{print $3}'`
+
+dnl libbtrfs .so version
 LIBBTRFS_MAJOR=0
 LIBBTRFS_MINOR=1
 LIBBTRFS_PATCHLEVEL=2
+
+dnl libbtrfsutil .so version
+BTRFS_UTIL_VERSION_MAJOR=`sed -rn 's/^\#define BTRFS_UTIL_VERSION_MAJOR ([0-9])+$/\1/p' libbtrfsutil/btrfsutil.h`
+BTRFS_UTIL_VERSION_MINOR=`sed -rn 's/^\#define BTRFS_UTIL_VERSION_MINOR ([0-9])+$/\1/p' libbtrfsutil/btrfsutil.h`
+BTRFS_UTIL_VERSION_PATCH=`sed -rn 's/^\#define BTRFS_UTIL_VERSION_PATCH ([0-9])+$/\1/p' libbtrfsutil/btrfsutil.h`
 
 CFLAGS=${CFLAGS:-"-g -O1 -Wall -D_FORTIFY_SOURCE=2"}
 AC_SUBST([CFLAGS])
@@ -85,7 +97,7 @@ fi
 
 
 AC_ARG_ENABLE([documentation],
-	      AS_HELP_STRING([--disable-documentation], [do not build domumentation]),
+	      AS_HELP_STRING([--disable-documentation], [do not build documentation]),
   [], [enable_documentation=yes]
 )
 AS_IF([test "x$enable_documentation" = xyes], [DISABLE_DOCUMENTATION=0], [DISABLE_DOCUMENTATION=1])
@@ -99,7 +111,6 @@ if test "x$enable_documentation" = xyes; then
 		AC_MSG_ERROR([cannot find xmlto, cannot build documentation])
 	fi
 
-	AC_PATH_PROG([GZIP], [gzip], [gzip])
 	AC_PATH_PROG([MV], [mv], [mv])
 	AC_PROG_SED
 	AC_PATH_PROG([ASCIIDOC], [asciidoc])
@@ -118,9 +129,30 @@ if test "x$enable_documentation" = xyes; then
 fi
 AC_SUBST([ASCIIDOC_TOOL])
 
+AC_ARG_ENABLE([programs],
+	      AS_HELP_STRING([--disable-programs], [do not build utility programs]),
+	      [], [enable_programs=yes]
+)
+AS_IF([test "x$enable_programs" = xyes], [BUILD_PROGRAMS=1], [BUILD_PROGRAMS=0])
+AC_SUBST([BUILD_PROGRAMS])
+
+AC_ARG_ENABLE([shared],
+	      AS_HELP_STRING([--disable-shared], [do not build shared libraries]),
+	      [], [enable_shared=yes]
+)
+AS_IF([test "x$enable_shared" = xyes], [BUILD_SHARED_LIBRARIES=1], [BUILD_SHARED_LIBRARIES=0])
+AC_SUBST([BUILD_SHARED_LIBRARIES])
+
+AC_ARG_ENABLE([static],
+	      AS_HELP_STRING([--disable-static], [do not build static libraries]),
+	      [], [enable_static=yes]
+)
+AS_IF([test "x$enable_static" = xyes], [BUILD_STATIC_LIBRARIES=1], [BUILD_STATIC_LIBRARIES=0])
+AC_SUBST([BUILD_STATIC_LIBRARIES])
+
 AC_ARG_ENABLE([convert],
 	      AS_HELP_STRING([--disable-convert], [do not build btrfs-convert]),
-  [], [enable_convert=yes]
+  [], [enable_convert=$enable_programs]
 )
 
 AS_IF([test "x$enable_convert" = xyes], [DISABLE_BTRFSCONVERT=0], [DISABLE_BTRFSCONVERT=1])
@@ -175,10 +207,43 @@ if test "$DISABLE_BTRFSCONVERT" = 0 && test "x$convertfs" = "x"; then
 	AC_MSG_ERROR([no filesystems for convert, use --disable-convert instead])
 fi
 
+AC_ARG_WITH([crypto],
+	    AS_HELP_STRING([[[]--with-crypto[[=builtin]]]], [provider of cryptographic primitives: builtin, libgcrypt, libsodium, libkcapi]),
+  [], [with_crypto=builtin]
+)
+
+cryptoprovider=
+cryptoproviderversion=
+CRYPTOPROVIDER_BUILTIN=0
+if test "$with_crypto" = "builtin"; then
+	cryptoprovider="builtin"
+	CRYPTOPROVIDER_BUILTIN=1
+	AC_DEFINE([CRYPTOPROVIDER_BUILTIN],[1],[Use builtin implementation])
+elif test "$with_crypto" = "libgcrypt"; then
+	cryptoprovider="libgcrypt"
+	PKG_CHECK_MODULES(GCRYPT, [libgcrypt >= 1.8.0])
+	AC_DEFINE([CRYPTOPROVIDER_LIBGCRYPT],[1],[Use libcrypt])
+	cryptoproviderversion=`pkg-config libgcrypt --version`
+elif test "$with_crypto" = "libsodium"; then
+	cryptoprovider="libsodium"
+	PKG_CHECK_MODULES(SODIUM, [libsodium >= 1.0.4])
+	AC_DEFINE([CRYPTOPROVIDER_LIBSODIUM],[1],[Use libsodium])
+	cryptoproviderversion=`pkg-config libsodium --version`
+elif test "$with_crypto" = "libkcapi"; then
+	cryptoprovider="libkcapi"
+	PKG_CHECK_MODULES(KCAPI, [libkcapi >= 1.0.0])
+	AC_DEFINE([CRYPTOPROVIDER_LIBKCAPI],[1],[Use libkcapi])
+	cryptoproviderversion=`pkg-config libkcapi --version`
+else
+	AC_MSG_ERROR([unrecognized crypto provider: $with_crypto])
+fi
+AC_SUBST([CRYPTOPROVIDER_BUILTIN])
+AC_DEFINE_UNQUOTED([CRYPTOPROVIDER],["$cryptoprovider"],[Crypto implementation source name])
+
 HAVE_OWN_FIEMAP_EXTENT_SHARED_DEFINE=0
 AX_CHECK_DEFINE([linux/fiemap.h], [FIEMAP_EXTENT_SHARED], [],
 		[HAVE_OWN_FIEMAP_EXTENT_SHARED_DEFINE=1
-		 AC_MSG_WARN([no definition of FIEMAP_EXTENT_SHARED found, probably old kernel, will use own defintion, 'btrfs fi du' might report wrong numbers])])
+		 AC_MSG_WARN([no definition of FIEMAP_EXTENT_SHARED found, probably old kernel, will use own definition, 'btrfs fi du' might report wrong numbers])])
 
 if test "x$HAVE_OWN_FIEMAP_EXTENT_SHARED_DEFINE" == "x1"; then
 AC_DEFINE([HAVE_OWN_FIEMAP_EXTENT_SHARED_DEFINE], [1], [We defined FIEMAP_EXTENT_SHARED])
@@ -215,7 +280,7 @@ AC_SUBST(BTRFSRESTORE_ZSTD)
 
 AC_ARG_ENABLE([python],
 	AS_HELP_STRING([--disable-python], [do not build libbtrfsutil Python bindings]),
-	[], [enable_python=yes]
+	[], [enable_python=$enable_shared]
 )
 
 if test "x$enable_python" = xyes; then
@@ -247,11 +312,22 @@ AC_SUBST([LZO2_LIBS])
 AC_SUBST([LZO2_LIBS_STATIC])
 AC_SUBST([LZO2_CFLAGS])
 
+dnl call PKG_INSTALLDIR from pkg.m4 to set pkgconfigdir
+m4_ifdef([PKG_INSTALLDIR], [PKG_INSTALLDIR], [AC_MSG_ERROR([please install pkgconf])])
 
-dnl library stuff
+dnl Versions
+AC_SUBST([BTRFS_VERSION_PLAIN])
+AC_SUBST([BTRFS_VERSION_MAJOR])
+AC_SUBST([BTRFS_VERSION_MINOR])
+AC_SUBST([BTRFS_VERSION_PATCHLEVEL])
+
 AC_SUBST([LIBBTRFS_MAJOR])
 AC_SUBST([LIBBTRFS_MINOR])
 AC_SUBST([LIBBTRFS_PATCHLEVEL])
+
+AC_SUBST([BTRFS_UTIL_VERSION_MAJOR])
+AC_SUBST([BTRFS_UTIL_VERSION_MINOR])
+AC_SUBST([BTRFS_UTIL_VERSION_PATCH])
 
 AC_CONFIG_HEADERS([config.h])
 
@@ -259,12 +335,15 @@ AC_CONFIG_FILES([
 Makefile.inc
 Documentation/Makefile
 version.h
+libbtrfsutil/libbtrfsutil.pc
 ])
 
 AC_OUTPUT
 
 AC_MSG_RESULT([
-	${PACKAGE_NAME} ${PACKAGE_VERSION}
+	btrfs-progs:        ${PACKAGE_VERSION}
+	libbtrfs:           ${LIBBTRFS_MAJOR}.${LIBBTRFS_MINOR}.${LIBBTRFS_PATCHLEVEL} (deprecated)
+	libbtrfsutil:       ${BTRFS_UTIL_VERSION_MAJOR}.${BTRFS_UTIL_VERSION_MINOR}.${BTRFS_UTIL_VERSION_PATCH}
 
 	prefix:             ${prefix}
 	exec prefix:        ${exec_prefix}
@@ -272,11 +351,15 @@ AC_MSG_RESULT([
 	bindir:             ${bindir}
 	libdir:             ${libdir}
 	includedir:         ${includedir}
+	pkgconfigdir:       ${pkgconfigdir}
 
 	compiler:           ${CC}
 	cflags:             ${CFLAGS}
 	ldflags:            ${LDFLAGS}
 
+	programs:           ${enable_programs}
+	shared libraries:   ${enable_shared}
+	static libraries:   ${enable_static}
 	documentation:      ${enable_documentation}
 	doc generator:      ${ASCIIDOC_TOOL}
 	backtrace support:  ${enable_backtrace}
@@ -284,6 +367,7 @@ AC_MSG_RESULT([
 	btrfs-restore zstd: ${enable_zstd}
 	Python bindings:    ${enable_python}
 	Python interpreter: ${PYTHON}
+	crypto provider:    ${cryptoprovider} ${cryptoproviderversion}
 
 	Type 'make' to compile.
 ])

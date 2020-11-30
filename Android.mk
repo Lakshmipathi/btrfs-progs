@@ -17,13 +17,15 @@ STATIC_LIBS := -luuid   -lblkid -luuid -lz   -llzo2 -L. -pthread
 btrfs_shared_libraries := libext2_uuid \
 			libext2_blkid
 
-objects := ctree.c disk-io.c kernel-lib/radix-tree.c extent-tree.c print-tree.c \
+objects := kernel-shared/ctree.c kernel-shared/disk-io.c kernel-lib/radix-tree.c \
+	  kernel-shared/extent-tree.c kernel-shared/print-tree.c \
           root-tree.c dir-item.c file-item.c inode-item.c inode-map.c \
-          extent-cache.c extent_io.c volumes.c utils.c repair.c \
-          qgroup.c free-space-cache.c kernel-lib/list_sort.c props.c \
-          kernel-shared/ulist.c qgroup-verify.c backref.c string-table.c task-utils.c \
-          inode.c file.c find-root.c free-space-tree.c help.c send-dump.c \
-          fsfeatures.c kernel-lib/tables.c kernel-lib/raid56.c transaction.c
+          common/extent-cache.c kernel-shared/extent_io.c kernel-shared/volumes.c utils.c repair.c \
+          qgroup.c kernel-shared/free-space-cache.c kernel-lib/list_sort.c props.c \
+          kernel-shared/ulist.c qgroup-verify.c backref.c common/string-table.c task-utils.c \
+          kernel-shared/inode.c kernel-shared/file.c \
+	  free-space-tree.c help.c cmds/receive-dump.c \
+          common/fsfeatures.c kernel-lib/tables.c kernel-lib/raid56.c kernel-shared/transaction.c
 cmds_objects := cmds-subvolume.c cmds-filesystem.c cmds-device.c cmds-scrub.c \
                cmds-inspect.c cmds-balance.c cmds-send.c cmds-receive.c \
                cmds-quota.c cmds-qgroup.c cmds-replace.c cmds-check.c \
@@ -31,13 +33,14 @@ cmds_objects := cmds-subvolume.c cmds-filesystem.c cmds-device.c cmds-scrub.c \
                cmds-property.c cmds-fi-usage.c cmds-inspect-dump-tree.c \
                cmds-inspect-dump-super.c cmds-inspect-tree-stats.c cmds-fi-du.c \
                mkfs/common.c
-libbtrfs_objects := send-stream.c send-utils.c kernel-lib/rbtree.c btrfs-list.c \
-                   kernel-lib/crc32c.c messages.c \
-                   uuid-tree.c utils-lib.c rbtree-utils.c
-libbtrfs_headers := send-stream.h send-utils.h send.h kernel-lib/rbtree.h btrfs-list.h \
-                   kernel-lib/crc32c.h kernel-lib/list.h kerncompat.h \
+libbtrfs_objects := common/send-stream.c common/send-utils.c kernel-lib/rbtree.c btrfs-list.c \
+                   crypto/crc32c.c messages.c \
+                   uuid-tree.c common/utils-lib.c rbtree-utils.c
+libbtrfs_headers := common/send-stream.h common/send-utils.h send.h kernel-lib/rbtree.h btrfs-list.h \
+                   crypto/crc32c.h kernel-lib/list.h kerncompat.h \
                    kernel-lib/radix-tree.h kernel-lib/sizes.h kernel-lib/raid56.h \
-                   extent-cache.h extent_io.h ioctl.h ctree.h btrfsck.h version.h
+                   common/extent-cache.h kernel-shared/extent_io.h ioctl.h \
+		   kernel-shared/ctree.h btrfsck.h version.h
 blkid_objects := partition/ superblocks/ topology/
 
 

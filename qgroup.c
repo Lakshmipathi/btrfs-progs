@@ -18,9 +18,9 @@
 
 #include "qgroup.h"
 #include <sys/ioctl.h>
-#include "ctree.h"
+#include "kernel-shared/ctree.h"
 #include "ioctl.h"
-#include "utils.h"
+#include "common/utils.h"
 #include <errno.h>
 
 #define BTRFS_QGROUP_NFILTERS_INCREASE (2 * BTRFS_QGROUP_FILTER_MAX)
@@ -43,20 +43,12 @@ struct btrfs_qgroup {
 	/*
 	 * info_item
 	 */
-	u64 generation;
-	u64 rfer;	/*referenced*/
-	u64 rfer_cmpr;	/*referenced compressed*/
-	u64 excl;	/*exclusive*/
-	u64 excl_cmpr;	/*exclusive compressed*/
+	struct btrfs_qgroup_info info;
 
 	/*
 	 *limit_item
 	 */
-	u64 flags;	/*which limits are set*/
-	u64 max_rfer;
-	u64 max_excl;
-	u64 rsv_rfer;
-	u64 rsv_excl;
+	struct btrfs_qgroup_limit limit;
 
 	/*qgroups this group is member of*/
 	struct list_head qgroups;
@@ -202,6 +194,11 @@ static int print_child_column(struct btrfs_qgroup *qgroup)
 	return len;
 }
 
+static int print_u64(u64 value, int unit_mode, int max_len)
+{
+	return printf("%*s", max_len, pretty_size_mode(value, unit_mode));
+}
+
 static void print_qgroup_column_add_blank(enum btrfs_qgroup_column_enum column,
 					  int len)
 {
@@ -228,24 +225,26 @@ static void print_qgroup_column(struct btrfs_qgroup *qgroup,
 		print_qgroup_column_add_blank(BTRFS_QGROUP_QGROUPID, len);
 		break;
 	case BTRFS_QGROUP_RFER:
-		len = printf("%*s", max_len, pretty_size_mode(qgroup->rfer, unit_mode));
+		len = print_u64(qgroup->info.referenced, unit_mode, max_len);
 		break;
 	case BTRFS_QGROUP_EXCL:
-		len = printf("%*s", max_len, pretty_size_mode(qgroup->excl, unit_mode));
+		len = print_u64(qgroup->info.exclusive, unit_mode, max_len);
 		break;
 	case BTRFS_QGROUP_PARENT:
 		len = print_parent_column(qgroup);
 		print_qgroup_column_add_blank(BTRFS_QGROUP_PARENT, len);
 		break;
 	case BTRFS_QGROUP_MAX_RFER:
-		if (qgroup->flags & BTRFS_QGROUP_LIMIT_MAX_RFER)
-			len = printf("%*s", max_len, pretty_size_mode(qgroup->max_rfer, unit_mode));
+		if (qgroup->limit.flags & BTRFS_QGROUP_LIMIT_MAX_RFER)
+			len = print_u64(qgroup->limit.max_referenced,
+					unit_mode, max_len);
 		else
 			len = printf("%*s", max_len, "none");
 		break;
 	case BTRFS_QGROUP_MAX_EXCL:
-		if (qgroup->flags & BTRFS_QGROUP_LIMIT_MAX_EXCL)
-			len = printf("%*s", max_len, pretty_size_mode(qgroup->max_excl, unit_mode));
+		if (qgroup->limit.flags & BTRFS_QGROUP_LIMIT_MAX_EXCL)
+			len = print_u64(qgroup->limit.max_exclusive,
+					unit_mode, max_len);
 		else
 			len = printf("%*s", max_len, "none");
 		break;
@@ -267,7 +266,7 @@ static void print_single_qgroup_table(struct btrfs_qgroup *qgroup)
 			continue;
 		print_qgroup_column(qgroup, i);
 
-		if (i != BTRFS_QGROUP_CHILD)
+		if (i != BTRFS_QGROUP_ALL - 1)
 			printf(" ");
 	}
 	printf("\n");
@@ -344,9 +343,9 @@ static int comp_entry_with_rfer(struct btrfs_qgroup *entry1,
 {
 	int ret;
 
-	if (entry1->rfer > entry2->rfer)
+	if (entry1->info.referenced > entry2->info.referenced)
 		ret = 1;
-	else if (entry1->rfer < entry2->rfer)
+	else if (entry1->info.referenced < entry2->info.referenced)
 		ret = -1;
 	else
 		ret = 0;
@@ -360,9 +359,9 @@ static int comp_entry_with_excl(struct btrfs_qgroup *entry1,
 {
 	int ret;
 
-	if (entry1->excl > entry2->excl)
+	if (entry1->info.exclusive > entry2->info.exclusive)
 		ret = 1;
-	else if (entry1->excl < entry2->excl)
+	else if (entry1->info.exclusive < entry2->info.exclusive)
 		ret = -1;
 	else
 		ret = 0;
@@ -376,9 +375,9 @@ static int comp_entry_with_max_rfer(struct btrfs_qgroup *entry1,
 {
 	int ret;
 
-	if (entry1->max_rfer > entry2->max_rfer)
+	if (entry1->limit.max_referenced > entry2->limit.max_referenced)
 		ret = 1;
-	else if (entry1->max_rfer < entry2->max_rfer)
+	else if (entry1->limit.max_referenced < entry2->limit.max_referenced)
 		ret = -1;
 	else
 		ret = 0;
@@ -392,9 +391,9 @@ static int comp_entry_with_max_excl(struct btrfs_qgroup *entry1,
 {
 	int ret;
 
-	if (entry1->max_excl > entry2->max_excl)
+	if (entry1->limit.max_exclusive > entry2->limit.max_exclusive)
 		ret = 1;
-	else if (entry1->max_excl < entry2->max_excl)
+	else if (entry1->limit.max_exclusive < entry2->limit.max_exclusive)
 		ret = -1;
 	else
 		ret = 0;
@@ -468,9 +467,8 @@ int btrfs_qgroup_setup_comparer(struct btrfs_qgroup_comparer_set  **comp_set,
 		tmp = set;
 		set = realloc(set, size);
 		if (!set) {
-			error("memory allocation failed");
 			free(tmp);
-			exit(1);
+			return -ENOMEM;
 		}
 
 		memset(&set->comps[set->total], 0,
@@ -610,8 +608,9 @@ static struct btrfs_qgroup *get_or_add_qgroup(
 
 	ret = qgroup_tree_insert(qgroup_lookup, bq);
 	if (ret) {
-		error("failed to insert %llu into tree: %s",
-		       (unsigned long long)bq->qgroupid, strerror(-ret));
+		errno = -ret;
+		error("failed to insert %llu into tree: %m",
+		       (unsigned long long)bq->qgroupid);
 		free(bq);
 		return ERR_PTR(ret);
 	}
@@ -628,11 +627,13 @@ static int update_qgroup_info(struct qgroup_lookup *qgroup_lookup, u64 qgroupid,
 	if (IS_ERR_OR_NULL(bq))
 		return PTR_ERR(bq);
 
-	bq->generation = btrfs_stack_qgroup_info_generation(info);
-	bq->rfer = btrfs_stack_qgroup_info_referenced(info);
-	bq->rfer_cmpr = btrfs_stack_qgroup_info_referenced_compressed(info);
-	bq->excl = btrfs_stack_qgroup_info_exclusive(info);
-	bq->excl_cmpr = btrfs_stack_qgroup_info_exclusive_compressed(info);
+	bq->info.generation = btrfs_stack_qgroup_info_generation(info);
+	bq->info.referenced = btrfs_stack_qgroup_info_referenced(info);
+	bq->info.referenced_compressed =
+			btrfs_stack_qgroup_info_referenced_compressed(info);
+	bq->info.exclusive = btrfs_stack_qgroup_info_exclusive(info);
+	bq->info.exclusive_compressed =
+			btrfs_stack_qgroup_info_exclusive_compressed(info);
 
 	return 0;
 }
@@ -647,11 +648,14 @@ static int update_qgroup_limit(struct qgroup_lookup *qgroup_lookup,
 	if (IS_ERR_OR_NULL(bq))
 		return PTR_ERR(bq);
 
-	bq->flags = btrfs_stack_qgroup_limit_flags(limit);
-	bq->max_rfer = btrfs_stack_qgroup_limit_max_referenced(limit);
-	bq->max_excl = btrfs_stack_qgroup_limit_max_exclusive(limit);
-	bq->rsv_rfer = btrfs_stack_qgroup_limit_rsv_referenced(limit);
-	bq->rsv_excl = btrfs_stack_qgroup_limit_rsv_exclusive(limit);
+	bq->limit.flags = btrfs_stack_qgroup_limit_flags(limit);
+	bq->limit.max_referenced =
+			btrfs_stack_qgroup_limit_max_referenced(limit);
+	bq->limit.max_exclusive =
+			btrfs_stack_qgroup_limit_max_exclusive(limit);
+	bq->limit.rsv_referenced =
+			btrfs_stack_qgroup_limit_rsv_referenced(limit);
+	bq->limit.rsv_exclusive = btrfs_stack_qgroup_limit_rsv_exclusive(limit);
 
 	return 0;
 }
@@ -942,22 +946,24 @@ static void __update_columns_max_len(struct btrfs_qgroup *bq,
 			btrfs_qgroup_columns[column].max_len = len;
 		break;
 	case BTRFS_QGROUP_RFER:
-		len = strlen(pretty_size_mode(bq->rfer, unit_mode));
+		len = strlen(pretty_size_mode(bq->info.referenced, unit_mode));
 		if (btrfs_qgroup_columns[column].max_len < len)
 			btrfs_qgroup_columns[column].max_len = len;
 		break;
 	case BTRFS_QGROUP_EXCL:
-		len = strlen(pretty_size_mode(bq->excl, unit_mode));
+		len = strlen(pretty_size_mode(bq->info.exclusive, unit_mode));
 		if (btrfs_qgroup_columns[column].max_len < len)
 			btrfs_qgroup_columns[column].max_len = len;
 		break;
 	case BTRFS_QGROUP_MAX_RFER:
-		len = strlen(pretty_size_mode(bq->max_rfer, unit_mode));
+		len = strlen(pretty_size_mode(bq->limit.max_referenced,
+			     unit_mode));
 		if (btrfs_qgroup_columns[column].max_len < len)
 			btrfs_qgroup_columns[column].max_len = len;
 		break;
 	case BTRFS_QGROUP_MAX_EXCL:
-		len = strlen(pretty_size_mode(bq->max_excl, unit_mode));
+		len = strlen(pretty_size_mode(bq->limit.max_exclusive,
+			     unit_mode));
 		if (btrfs_qgroup_columns[column].max_len < len)
 			btrfs_qgroup_columns[column].max_len = len;
 		break;
@@ -1038,11 +1044,30 @@ static inline void print_status_flag_warning(u64 flags)
 		warning("qgroup data inconsistent, rescan recommended");
 }
 
-static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
+static bool key_in_range(const struct btrfs_key *key,
+			 const struct btrfs_ioctl_search_key *sk)
+{
+	if (key->objectid < sk->min_objectid ||
+	    key->objectid > sk->max_objectid)
+		return false;
+
+	if (key->type < sk->min_type ||
+	    key->type > sk->max_type)
+		return false;
+
+	if (key->offset < sk->min_offset ||
+	    key->offset > sk->max_offset)
+		return false;
+
+	return true;
+}
+
+static int __qgroups_search(int fd, struct btrfs_ioctl_search_args *args,
+			    struct qgroup_lookup *qgroup_lookup)
 {
 	int ret;
-	struct btrfs_ioctl_search_args args;
-	struct btrfs_ioctl_search_key *sk = &args.key;
+	struct btrfs_ioctl_search_key *sk = &args->key;
+	struct btrfs_ioctl_search_key filter_key = args->key;
 	struct btrfs_ioctl_search_header *sh;
 	unsigned long off = 0;
 	unsigned int i;
@@ -1053,30 +1078,15 @@ static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
 	u64 qgroupid;
 	u64 child, parent;
 
-	memset(&args, 0, sizeof(args));
-
-	sk->tree_id = BTRFS_QUOTA_TREE_OBJECTID;
-	sk->max_type = BTRFS_QGROUP_RELATION_KEY;
-	sk->min_type = BTRFS_QGROUP_STATUS_KEY;
-	sk->max_objectid = (u64)-1;
-	sk->max_offset = (u64)-1;
-	sk->max_transid = (u64)-1;
-	sk->nr_items = 4096;
-
 	qgroup_lookup_init(qgroup_lookup);
 
 	while (1) {
-		ret = ioctl(fd, BTRFS_IOC_TREE_SEARCH, &args);
+		ret = ioctl(fd, BTRFS_IOC_TREE_SEARCH, args);
 		if (ret < 0) {
-			if (errno == ENOENT) {
-				error("can't list qgroups: quotas not enabled");
+			if (errno == ENOENT)
 				ret = -ENOTTY;
-			} else {
-				error("can't list qgroups: %s",
-				       strerror(errno));
+			else
 				ret = -errno;
-			}
-
 			break;
 		}
 
@@ -1090,37 +1100,46 @@ static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
 		 * read the root_ref item it contains
 		 */
 		for (i = 0; i < sk->nr_items; i++) {
-			sh = (struct btrfs_ioctl_search_header *)(args.buf +
+			struct btrfs_key key;
+
+			sh = (struct btrfs_ioctl_search_header *)(args->buf +
 								  off);
 			off += sizeof(*sh);
 
-			switch (btrfs_search_header_type(sh)) {
+			key.objectid = btrfs_search_header_objectid(sh);
+			key.type = btrfs_search_header_type(sh);
+			key.offset = btrfs_search_header_offset(sh);
+
+			if (!key_in_range(&key, &filter_key))
+				goto next;
+
+			switch (key.type) {
 			case BTRFS_QGROUP_STATUS_KEY:
 				si = (struct btrfs_qgroup_status_item *)
-				     (args.buf + off);
+				     (args->buf + off);
 				flags = btrfs_stack_qgroup_status_flags(si);
 
 				print_status_flag_warning(flags);
 				break;
 			case BTRFS_QGROUP_INFO_KEY:
-				qgroupid = btrfs_search_header_offset(sh);
+				qgroupid = key.offset;
 				info = (struct btrfs_qgroup_info_item *)
-				       (args.buf + off);
+				       (args->buf + off);
 
 				ret = update_qgroup_info(qgroup_lookup,
 							 qgroupid, info);
 				break;
 			case BTRFS_QGROUP_LIMIT_KEY:
-				qgroupid = btrfs_search_header_offset(sh);
+				qgroupid = key.offset;
 				limit = (struct btrfs_qgroup_limit_item *)
-					(args.buf + off);
+					(args->buf + off);
 
 				ret = update_qgroup_limit(qgroup_lookup,
 							  qgroupid, limit);
 				break;
 			case BTRFS_QGROUP_RELATION_KEY:
-				child = btrfs_search_header_offset(sh);
-				parent = btrfs_search_header_objectid(sh);
+				child = key.offset;
+				parent = key.objectid;
 
 				if (parent <= child)
 					break;
@@ -1135,15 +1154,16 @@ static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
 			if (ret)
 				return ret;
 
+next:
 			off += btrfs_search_header_len(sh);
 
 			/*
 			 * record the mins in sk so we can make sure the
 			 * next search doesn't repeat this root
 			 */
-			sk->min_type = btrfs_search_header_type(sh);
-			sk->min_offset = btrfs_search_header_offset(sh);
-			sk->min_objectid = btrfs_search_header_objectid(sh);
+			sk->min_type = key.type;
+			sk->min_offset = key.offset;
+			sk->min_objectid = key.objectid;
 		}
 		sk->nr_items = 4096;
 		/*
@@ -1156,6 +1176,67 @@ static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
 			break;
 	}
 
+	return ret;
+}
+
+static int qgroups_search_all(int fd, struct qgroup_lookup *qgroup_lookup)
+{
+	struct btrfs_ioctl_search_args args = {
+		.key = {
+			.tree_id = BTRFS_QUOTA_TREE_OBJECTID,
+			.max_type = BTRFS_QGROUP_RELATION_KEY,
+			.min_type = BTRFS_QGROUP_STATUS_KEY,
+			.max_objectid = (u64)-1,
+			.max_offset = (u64)-1,
+			.max_transid = (u64)-1,
+			.nr_items = 4096,
+		},
+	};
+	int ret;
+
+	ret = __qgroups_search(fd, &args, qgroup_lookup);
+	if (ret == -ENOTTY)
+		error("can't list qgroups: quotas not enabled");
+	else if (ret < 0)
+		error("can't list qgroups: %s", strerror(-ret));
+	return ret;
+}
+
+int btrfs_qgroup_query(int fd, u64 qgroupid, struct btrfs_qgroup_stats *stats)
+{
+	struct btrfs_ioctl_search_args args = {
+		.key = {
+			.tree_id = BTRFS_QUOTA_TREE_OBJECTID,
+			.min_type = BTRFS_QGROUP_INFO_KEY,
+			.max_type = BTRFS_QGROUP_LIMIT_KEY,
+			.max_objectid = 0,
+			.min_offset = qgroupid,
+			.max_offset = qgroupid,
+			.max_transid = (u64)-1,
+			.nr_items = 4096,
+		},
+	};
+	struct qgroup_lookup qgroup_lookup;
+	struct btrfs_qgroup *qgroup;
+	struct rb_node *n;
+	int ret;
+
+	ret = __qgroups_search(fd, &args, &qgroup_lookup);
+	if (ret < 0)
+		return ret;
+
+	ret = -ENODATA;
+	n = rb_first(&qgroup_lookup.root);
+	if (n) {
+		qgroup = rb_entry(n, struct btrfs_qgroup, rb_node);
+		stats->qgroupid = qgroup->qgroupid;
+		stats->info = qgroup->info;
+		stats->limit = qgroup->limit;
+
+		ret = 0;
+	}
+
+	__free_all_qgroups(&qgroup_lookup);
 	return ret;
 }
 
@@ -1184,7 +1265,7 @@ int btrfs_show_qgroups(int fd,
 	struct qgroup_lookup sort_tree;
 	int ret;
 
-	ret = __qgroups_search(fd, &qgroup_lookup);
+	ret = qgroups_search_all(fd, &qgroup_lookup);
 	if (ret)
 		return ret;
 	__filter_and_sort_qgroups(&qgroup_lookup, &sort_tree,
@@ -1195,6 +1276,13 @@ int btrfs_show_qgroups(int fd,
 	return ret;
 }
 
+/*
+ * Parse sort string and allocate new comparator.
+ *
+ * Return: 0 no errors while parsing
+ *         1 parse error
+ *        <0 other errors
+ */
 int btrfs_qgroup_parse_sort_string(const char *opt_arg,
 				   struct btrfs_qgroup_comparer_set **comps)
 {
@@ -1204,7 +1292,7 @@ int btrfs_qgroup_parse_sort_string(const char *opt_arg,
 	char **ptr_argv;
 	int what_to_sort;
 	char *opt_tmp;
-	int ret = 0;
+	int ret = 0, ret2;
 
 	opt_tmp = strdup(opt_arg);
 	if (!opt_tmp)
@@ -1232,7 +1320,7 @@ int btrfs_qgroup_parse_sort_string(const char *opt_arg,
 		}
 
 		if (flag == 0) {
-			ret = -1;
+			ret = 1;
 			goto out;
 		} else {
 			if (*p == '+') {
@@ -1246,10 +1334,15 @@ int btrfs_qgroup_parse_sort_string(const char *opt_arg,
 
 			what_to_sort = btrfs_qgroup_get_sort_item(p);
 			if (what_to_sort < 0) {
-				ret = -1;
+				ret = 1;
 				goto out;
 			}
-			btrfs_qgroup_setup_comparer(comps, what_to_sort, order);
+			ret2 = btrfs_qgroup_setup_comparer(comps, what_to_sort,
+					order);
+			if (ret2 < 0) {
+				ret = ret2;
+				goto out;
+			}
 		}
 		p = strtok(NULL, ",");
 	}

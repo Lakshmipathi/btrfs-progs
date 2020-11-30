@@ -33,9 +33,9 @@
 #undef ULONG_MAX
 
 #include "kerncompat.h"
-#include "ctree.h"
+#include "kernel-shared/ctree.h"
 #include "ioctl.h"
-#include "utils.h"
+#include "common/utils.h"
 
 static int use_color;
 static void
@@ -84,7 +84,7 @@ print_bg(FILE *html, char *name, u64 start, u64 len, u64 used, u64 flags,
 {
 	double frag = (double)areas / (len / 4096) * 2;
 
-	fprintf(html, "<p>%s chunk starts at %lld, size is %s, %.2f%% used, "
+	fprintf(html, "<p>%s chunk starts at %llu, size is %s, %.2f%% used, "
 		      "%.2f%% fragmented</p>\n", chunk_type(flags), start,
 		      pretty_size(len), 100.0 * used / len, 100.0 * frag);
 	fprintf(html, "<img src=\"%s\" border=\"1\" />\n", name);
@@ -264,8 +264,8 @@ list_fragments(int fd, u64 flags, char *dir)
 				bgflags = btrfs_block_group_flags(bg);
 				bgused = btrfs_block_group_used(bg);
 
-				printf("found block group %lld len %lld "
-					"flags %lld\n",
+				printf("found block group %llu len %llu "
+					"flags %llu\n",
 					btrfs_search_header_objectid(sh),
 					btrfs_search_header_offset(sh),
 					bgflags);
@@ -322,7 +322,7 @@ list_fragments(int fd, u64 flags, char *dir)
 				else
 					c = black;
 				if (btrfs_search_header_objectid(sh) > bgend) {
-					printf("WARN: extent %lld is without "
+					printf("WARN: extent %llu is without "
 						"block group\n",
 						btrfs_search_header_objectid(sh));
 					goto skip;
@@ -442,7 +442,7 @@ int main(int argc, char **argv)
 
 	set_argv0(argv);
 	if (check_argc_min(argc - optind, 1))
-		fragments_usage();
+		return 1;
 
 	path = argv[optind++];
 

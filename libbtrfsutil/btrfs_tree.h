@@ -54,7 +54,7 @@
 /* for storing balance parameters in the root tree */
 #define BTRFS_BALANCE_OBJECTID -4ULL
 
-/* orhpan objectid for tracking unlinked/truncated files */
+/* orphan objectid for tracking unlinked/truncated files */
 #define BTRFS_ORPHAN_OBJECTID -5ULL
 
 /* does write ahead logging to speed up fsyncs */
@@ -270,7 +270,7 @@
 #define BTRFS_PERSISTENT_ITEM_KEY	249
 
 /*
- * Persistantly stores the device replace state in the device tree.
+ * Persistently stores the device replace state in the device tree.
  * The key is built like this: (0, BTRFS_DEV_REPLACE_KEY, 0).
  */
 #define BTRFS_DEV_REPLACE_KEY	250
@@ -800,11 +800,6 @@ struct btrfs_dev_stats_item {
 
 #define BTRFS_DEV_REPLACE_ITEM_CONT_READING_FROM_SRCDEV_MODE_ALWAYS	0
 #define BTRFS_DEV_REPLACE_ITEM_CONT_READING_FROM_SRCDEV_MODE_AVOID	1
-#define BTRFS_DEV_REPLACE_ITEM_STATE_NEVER_STARTED	0
-#define BTRFS_DEV_REPLACE_ITEM_STATE_STARTED		1
-#define BTRFS_DEV_REPLACE_ITEM_STATE_SUSPENDED		2
-#define BTRFS_DEV_REPLACE_ITEM_STATE_FINISHED		3
-#define BTRFS_DEV_REPLACE_ITEM_STATE_CANCELED		4
 
 struct btrfs_dev_replace_item {
 	/*

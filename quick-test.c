@@ -20,11 +20,11 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include "kerncompat.h"
-#include "radix-tree.h"
-#include "ctree.h"
-#include "disk-io.h"
-#include "print-tree.h"
-#include "transaction.h"
+#include "kernel-lib/radix-tree.h"
+#include "kernel-shared/ctree.h"
+#include "kernel-shared/disk-io.h"
+#include "kernel-shared/print-tree.h"
+#include "kernel-shared/transaction.h"
 
 /* for testing only */
 static int next_key(int i, int max_key) {
@@ -94,7 +94,7 @@ int main(int ac, char **av) {
 			fprintf(stderr, "search %d:%d\n", num, i);
 		ret = btrfs_search_slot(NULL, root, &ins, &path, 0, 0);
 		if (ret) {
-			btrfs_print_tree(root, root->node, 1);
+			btrfs_print_tree(root->node, 1, BTRFS_PRINT_TREE_BFS);
 			printf("unable to find %d\n", num);
 			exit(1);
 		}
@@ -107,7 +107,7 @@ int main(int ac, char **av) {
 		fprintf(stderr, "Open ctree failed\n");
 		exit(1);
 	}
-	printf("node %p level %d total ptrs %d free spc %lu\n", root->node,
+	printf("node %p level %d total ptrs %u free spc %lu\n", root->node,
 	        btrfs_header_level(root->node),
 		btrfs_header_nritems(root->node),
 		(unsigned long)BTRFS_NODEPTRS_PER_BLOCK(root->fs_info) -
@@ -171,7 +171,7 @@ int main(int ac, char **av) {
 			fprintf(stderr, "search %d:%d\n", num, i);
 		ret = btrfs_search_slot(NULL, root, &ins, &path, 0, 0);
 		if (ret) {
-			btrfs_print_tree(root, root->node, 1);
+			btrfs_print_tree(root->node, 1, BTRFS_PRINT_TREE_BFS);
 			printf("unable to find %d\n", num);
 			exit(1);
 		}
@@ -220,7 +220,7 @@ int main(int ac, char **av) {
 	btrfs_commit_transaction(trans, root);
 	printf("tree size is now %d\n", tree_size);
 	printf("root %p commit root %p\n", root->node, root->commit_root);
-	btrfs_print_tree(root, root->node, 1);
+	btrfs_print_tree(root->node, 1, BTRFS_PRINT_TREE_BFS);
 	close_ctree(root);
 	return 0;
 }

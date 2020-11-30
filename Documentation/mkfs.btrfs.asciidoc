@@ -19,32 +19,51 @@ Before mounting such filesystem, the kernel module must know all the devices
 either via preceding execution of *btrfs device scan* or using the *device*
 mount option. See section *MULTIPLE DEVICES* for more details.
 
+The default block group profiles for data and metadata depend on number of
+devices and possibly other factors. It's recommended to use specific profiles
+but the defaults should be OK and allowing future conversions to other profiles.
+Please see options '-d' and '-m' for further detals and `btrfs-balance`(8) for
+the profile conversion post mkfs.
+
 OPTIONS
 -------
 *-b|--byte-count <size>*::
 Specify the size of the filesystem. If this option is not used, then
 mkfs.btrfs uses the entire device space for the filesystem.
 
+*--csum <type>*::
+*--checksum <type>*::
+Specify the checksum algorithm. Default is 'crc32c'. Valid values are 'crc32c',
+'xxhash', 'sha256' or 'blake2'. To mount such filesystem kernel must support the
+checksums as well. See 'CHECKSUM ALGORITHMS' in `btrfs`(5).
+
 *-d|--data <profile>*::
 Specify the profile for the data block groups.  Valid values are 'raid0',
-'raid1', 'raid5', 'raid6', 'raid10' or 'single' or dup (case does not matter).
+'raid1', 'raid1c3', 'raid1c4', 'raid5', 'raid6', 'raid10' or 'single' or 'dup'
+(case does not matter).
 +
-See 'DUP PROFILES ON A SINGLE DEVICE' for more.
+See 'DUP PROFILES ON A SINGLE DEVICE' for more details.
++
+On multiple devices, the default was 'raid0' until version 5.7, while it is
+'single' since version 5.8. You can still select raid0 manually, but it was not
+suitable as default.
 
 *-m|--metadata <profile>*::
 Specify the profile for the metadata block groups.
-Valid values are 'raid0', 'raid1', 'raid5', 'raid6', 'raid10', 'single' or
-'dup', (case does not matter).
+Valid values are 'raid0', 'raid1', 'raid1c3', 'raid1c4', 'raid5', 'raid6',
+'gaid10', 'single' or 'dup' (case does not matter).
 +
-A single device filesystem will default to 'DUP', unless a SSD is detected. Then
-it will default to 'single'. The detection is based on the value of
+Default on a single device filesystem is 'DUP', unless an SSD is detected, in which
+case it will default to 'single'. The detection is based on the value of
 `/sys/block/DEV/queue/rotational`, where 'DEV' is the short name of the device.
 +
 Note that the rotational status can be arbitrarily set by the underlying block
 device driver and may not reflect the true status (network block device, memory-backed
-SCSI devices etc). Use the options '--data/--metadata' to avoid confusion.
+SCSI devices etc). It's recommended to options '--data/--metadata' to avoid confusion.
 +
 See 'DUP PROFILES ON A SINGLE DEVICE' for more details.
++
+On multiple devices the default is 'raid1'.
 
 *-M|--mixed*::
 Normally the data and metadata block groups are isolated. The 'mixed' mode
@@ -86,8 +105,8 @@ Specify the sectorsize, the minimum data block allocation unit.
 +
 The default value is the page size and is autodetected. If the sectorsize
 differs from the page size, the created filesystem may not be mountable by the
-kernel. Therefore it is not recommended to use this option unless you are going
-to mount it on a system with the appropriate page size.
+running kernel. Therefore it is not recommended to use this option unless you
+are going to mount it on a system with the appropriate page size.
 
 *-L|--label <string>*::
 Specify a label for the filesystem. The 'string' should be less than 256
@@ -109,10 +128,10 @@ not minimized. Please see option '--shrink' if you need that functionality.
 *--shrink*::
 Shrink the filesystem to its minimal size, only works with '--rootdir' option.
 +
-If the destination is a regular file, this option will also truncate the
-file to the minimal size. Otherwise it will reduce the filesystem available
-space.  Extra space will not be usable unless the filesystem is mounted and
-resized using 'btrfs filesystem resize'.
+If the destination block device is a regular file, this option will also
+truncate the file to the minimal size. Otherwise it will reduce the filesystem
+available space.  Extra space will not be usable unless the filesystem is
+mounted and resized using 'btrfs filesystem resize'.
 +
 NOTE: prior to version 4.14.1, the shrinking was done automatically.
 
@@ -124,6 +143,17 @@ See section *FILESYSTEM FEATURES* for more details.  To see all available
 features that mkfs.btrfs supports run:
 +
 +mkfs.btrfs -O list-all+
+
+*-R|--runtime-features <feature1>[,<feature2>...]*::
+A list of features that be can enabled at mkfs time, otherwise would have
+to be turned on a mounted filesystem.
+Although no runtime feature is enabled by default,
+to disable a feature, prefix it with '^'.
++
+See section *RUNTIME FEATURES* for more details.  To see all available
+runtime features that mkfs.btrfs supports run:
++
++mkfs.btrfs -R list-all+
 
 *-f|--force*::
 Forcibly overwrite the block devices when an existing filesystem is detected.
@@ -143,12 +173,6 @@ Print the *mkfs.btrfs* version and exit.
 
 *--help*::
 Print help.
-
-*-A|--alloc-start <offset>*::
-*deprecated, will be removed*
-(An option to help debugging chunk allocator.)
-Specify the (physical) offset from the start of the device at which allocations
-start.  The default value is zero.
 
 SIZE UNITS
 ----------
@@ -219,6 +243,26 @@ reduced-size metadata for extent references, saves a few percent of metadata
 improved representation of file extents where holes are not explicitly
 stored as an extent, saves a few percent of metadata if sparse files are used
 
+RUNTIME FEATURES
+----------------
+
+Features that are typically enabled on a mounted filesystem, eg. by a mount
+option or by an ioctl. Some of them can be enabled early, at mkfs time.  This
+applies to features that need to be enabled once and then the status is
+permanent, this does not replace mount options.
+
+*quota*::
+(kernel support since 3.4)
++
+Enable quota support (qgroups). The qgroup accounting will be consistent,
+can be used together with '--rootdir'.  See also `btrfs-quota`(8).
+
+*free-space-tree*::
+(kernel support since 4.5)
++
+Enable the free space tree (mount option space_cache=v2) for persisting the
+free space cache.
+
 BLOCK GROUPS, CHUNKS, RAID
 --------------------------
 
@@ -260,26 +304,28 @@ PROFILES
 
 There are the following block group types available:
 
-[ cols="^,^,^,^,^",width="60%" ]
+[ cols="<,^,^,^,>,^",width="60%" ]
 |=============================================================
-.2+^.<h| Profile   3+^.^h| Redundancy           .2+^.<h| Min/max devices
+.2+^.<h| Profile   3+^.^h| Redundancy           .2+^.<h| Space utilization .2+^.<h| Min/max devices
       ^.^h| Copies   ^.^h| Parity     ^.<h| Striping
-| single  | 1            |                |            | 1/any
-| DUP     | 2 / 1 device |                |            | 1/any ^(see note 1)^
-| RAID0   |              |                | 1 to N     | 2/any
-| RAID1   | 2            |                |            | 2/any
-| RAID10  | 2            |                | 1 to N     | 4/any
-| RAID5   | 1            | 1              | 2 to N - 1 | 2/any ^(see note 2)^
-| RAID6   | 1            | 2              | 3 to N - 2 | 3/any ^(see note 3)^
+| single  | 1            |                |            |        100% | 1/any
+| DUP     | 2 / 1 device |                |            |         50% | 1/any ^(see note 1)^
+| RAID0   |              |                | 1 to N     |        100% | 2/any
+| RAID1   | 2            |                |            |         50% | 2/any
+| RAID1C3 | 3            |                |            |         33% | 3/any
+| RAID1C4 | 4            |                |            |         25% | 4/any
+| RAID10  | 2            |                | 1 to N     |         50% | 4/any
+| RAID5   | 1            | 1              | 2 to N-1   |     (N-1)/N | 2/any ^(see note 2)^
+| RAID6   | 1            | 2              | 3 to N-2   |     (N-2)/N | 3/any ^(see note 3)^
 |=============================================================
 
-WARNING: It's not recommended to build btrfs with RAID0/1/10/5/6 profiles on
-partitions from the same device.  Neither redundancy nor performance will be
-improved.
+WARNING: It's not recommended to create filesystems with RAID0/1/10/5/6
+profiles on partitions from the same device.  Neither redundancy nor
+performance will be improved.
 
 'Note 1:' DUP may exist on more than 1 device if it starts on a single device and
 another one is added. Since version 4.5.1, *mkfs.btrfs* will let you create DUP
-on multiple devices.
+on multiple devices without restrictions.
 
 'Note 2:' It's not recommended to use 2 devices with RAID5. In that case,
 parity stripe will contain the same data as the data stripe, making RAID5
@@ -287,7 +333,75 @@ degraded to RAID1 with more overhead.
 
 'Note 3:' It's also not recommended to use 3 devices with RAID6, unless you
 want to get effectively 3 copies in a RAID1-like manner (but not exactly that).
-N-copies RAID1 is not implemented.
+
+'Note 4:' Since kernel 5.5 it's possible to use RAID1C3 as replacement for
+RAID6, higher space cost but reliable.
+
+PROFILE LAYOUT
+~~~~~~~~~~~~~~
+
+For the following examples, assume devices numbered by 1, 2, 3 and 4, data or
+metadata blocks A, B, C, D, with possible stripes eg. A1, A2 that would be
+logically A, etc. For parity profiles PA and QA are parity and syndrom,
+associated with the given stripe.  The simple layouts single or DUP are left
+out.  Actual physical block placement on devices depends on current state of
+the free/allocated space and may appear random. All devices are assumed to be
+present at the time of the blocks would have been written.
+
+RAID1
+
+[ cols="^,^,^,^",width="50%", options="header" ]
+|===
+| device 1 | device 2 | device 3 | device 4
+| A        | D        |          |
+| B        |          |          | C
+| C        |          |          |
+| D        | A        | B        |
+|===
+
+RAID1C3
+
+[ cols="^,^,^,^",width="50%", options="header" ]
+|===
+| device 1 | device 2 | device 3 | device 4
+| A        | A        | D        |
+| B        |          | B        |
+| C        |          | A        | C
+| D        | D        | C        | B
+|===
+
+RAID0
+
+[ cols="^,^,^,^",width="50%", options="header" ]
+|===
+| device 1 | device 2 | device 3 | device 4
+| A2       | C3       | A3       | C2
+| B1       | A1       | D2       | B3
+| C1       | D3       | B4       | D1
+| D4       | B2       | C4       | A4
+|===
+
+RAID5
+
+[ cols="^,^,^,^",width="50%", options="header" ]
+|===
+| device 1 | device 2 | device 3 | device 4
+| A2       | C3       | A3       | C2
+| B1       | A1       | D2       | B3
+| C1       | D3       | PB       | D1
+| PD       | B2       | PC       | PA
+|===
+
+RAID6
+
+[ cols="^,^,^,^",width="50%", options="header" ]
+|===
+| device 1 | device 2 | device 3 | device 4
+| A2       | QC       | QA       | C2
+| B1       | A1       | D2       | QB
+| C1       | QD       | PB       | D1
+| PD       | B2       | PC       | PA
+|===
 
 DUP PROFILES ON A SINGLE DEVICE
 -------------------------------
@@ -376,4 +490,5 @@ SEE ALSO
 --------
 `btrfs`(5),
 `btrfs`(8),
+`btrfs-balance`(8),
 `wipefs`(8)

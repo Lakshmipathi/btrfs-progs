@@ -16,9 +16,9 @@
 
 #include "kerncompat.h"
 #include <unistd.h>
-#include "internal.h"
-#include "disk-io.h"
-#include "volumes.h"
+#include "common/internal.h"
+#include "kernel-shared/disk-io.h"
+#include "kernel-shared/volumes.h"
 #include "convert/common.h"
 #include "convert/source-fs.h"
 
@@ -74,6 +74,7 @@ void init_convert_context(struct btrfs_convert_context *cctx)
 	cache_tree_init(&cctx->used_space);
 	cache_tree_init(&cctx->data_chunks);
 	cache_tree_init(&cctx->free_space);
+	cache_tree_init(&cctx->free_space_initial);
 }
 
 void clean_convert_context(struct btrfs_convert_context *cctx)
@@ -81,6 +82,7 @@ void clean_convert_context(struct btrfs_convert_context *cctx)
 	free_extent_cache_tree(&cctx->used_space);
 	free_extent_cache_tree(&cctx->data_chunks);
 	free_extent_cache_tree(&cctx->free_space);
+	free_extent_cache_tree(&cctx->free_space_initial);
 }
 
 int block_iterate_proc(u64 disk_block, u64 file_block,
@@ -90,7 +92,7 @@ int block_iterate_proc(u64 disk_block, u64 file_block,
 	u64 reserved_boundary;
 	int do_barrier;
 	struct btrfs_root *root = idata->root;
-	struct btrfs_block_group_cache *cache;
+	struct btrfs_block_group *cache;
 	u32 sectorsize = root->fs_info->sectorsize;
 	u64 bytenr = disk_block * sectorsize;
 
@@ -120,7 +122,7 @@ int block_iterate_proc(u64 disk_block, u64 file_block,
 		} else {
 			cache = btrfs_lookup_block_group(root->fs_info, bytenr);
 			BUG_ON(!cache);
-			bytenr = cache->key.objectid + cache->key.offset;
+			bytenr = cache->start + cache->length;
 		}
 
 		idata->first_block = file_block;
@@ -201,7 +203,7 @@ int read_disk_extent(struct btrfs_root *root, u64 bytenr,
 	ret = 0;
 fail:
 	if (ret > 0)
-		ret = -1;
+		ret = -EIO;
 	return ret;
 }
 

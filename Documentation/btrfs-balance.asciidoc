@@ -16,7 +16,9 @@ all devices so they match constraints defined by the respective profiles. See
 `mkfs.btrfs`(8) section 'PROFILES' for more details.
 The scope of the balancing process can be further tuned by use of filters that
 can select the block groups to process. Balance works only on a mounted
-filesystem.
+filesystem.  Extent sharing is preserved and reflinks are not broken.
+Files are not defragmented nor recompressed, file extents are preserved
+but the physical location on devices will change.
 
 The balance operation is cancellable by the user. The on-disk state of the
 filesystem is always consistent so an unexpected interruption (eg. system crash,
@@ -25,7 +27,7 @@ is temporarily stored as an internal state and will be resumed upon mount,
 unless the mount option 'skip_balance' is specified.
 
 WARNING: running balance without filters will take a lot of time as it basically
-rewrites the entire filesystem and needs to update all block pointers.
+move data/metadata from the whol filesystem and needs to update all block pointers.
 
 The filters can be used to perform following actions:
 
@@ -34,7 +36,12 @@ The filters can be used to perform following actions:
 - perform actions only on a given device (filters 'devid', 'drange')
 
 The filters can be applied to a combination of block group types (data,
-metadata, system). Note that changing 'system' needs the force option.
+metadata, system). Note that changing only the 'system' type needs the force
+option. Otherwise 'system' gets automatically converted whenver 'metadata'
+profile is converted.
+
+When metadata redundancy is reduced (eg. from RAID1 to single) the force option
+is also required and it is noted in system log.
 
 NOTE: the balance operation needs enough work space, ie. space that is
 completely unused in the filesystem, otherwise this may lead to ENOSPC reports.
@@ -66,6 +73,10 @@ SUBCOMMAND
 *cancel* <path>::
 cancels a running or paused balance, the command will block and wait until the
 current blockgroup being processed completes
++
+Since kernel 5.7 the response time of the cancellation is significantly
+improved, on older kernels it might take a long time until currently
+processed chunk is completely finished.
 
 *pause* <path>::
 pause running balance operation, this will store the state of the balance
@@ -73,22 +84,25 @@ progress and used filters to the filesystem
 
 *resume* <path>::
 resume interrupted balance, the balance status must be stored on the filesystem
-from previous run, eg. after it was forcibly interrupted and mounted again with
-'skip_balance'
+from previous run, eg. after it was paused or forcibly interrupted and mounted
+again with 'skip_balance'
 
 *start* [options] <path>::
-start the balance operation according to the specified filters, no filters
-will rewrite the entire filesystem. The process runs in the foreground.
+start the balance operation according to the specified filters, without any filters
+the data and metadata from the whole filesystem are moved. The process runs in
+the foreground.
 +
-NOTE: the balance command without filters will basically rewrite everything
-in the filesystem. The run time is potentially very long, depending on the
-filesystem size. To prevent starting a full balance by accident, the user is
-warned and has a few seconds to cancel the operation before it starts. The
-warning and delay can be skipped with '--full-balance' option.
+NOTE: the balance command without filters will basically move everything in the
+filesystem to a new physical location on devices (ie. it does not affect the
+logical properties of file extents like offsets within files and extent
+sharing).  The run time is potentially very long, depending on the filesystem
+size. To prevent starting a full balance by accident, the user is warned and
+has a few seconds to cancel the operation before it starts.  The warning and
+delay can be skipped with '--full-balance' option.
 +
 Please note that the filters must be written together with the '-d', '-m' and
-'-s' options, because they're optional and bare '-d' etc also work and mean no
-filters.
+'-s' options, because they're optional and bare '-d' and '-m' also work and
+mean no filters.
 +
 `Options`
 +
@@ -98,18 +112,21 @@ act on data block groups, see `FILTERS` section for details about 'filters'
 act on metadata chunks, see `FILTERS` section for details about 'filters'
 -s[<filters>]::::
 act on system chunks (requires '-f'), see `FILTERS` section for details about 'filters'.
--v::::
-be verbose and print balance filter arguments
 -f::::
-force reducing of metadata integrity, eg. when going from 'raid1' to 'single'
+force a reduction of metadata integrity, eg. when going from 'raid1' to 'single'
 --background|--bg::::
 run the balance operation asynchronously in the background, uses `fork`(2) to
 start the process that calls the kernel ioctl
+-v::::
+(deprecated) alias for global '-v' option
 
 *status* [-v] <path>::
 Show status of running or paused balance.
 +
-If '-v' option is given, output will be verbose.
+`Options`
++
+-v::::
+(deprecated) alias for global '-v' option
 
 FILTERS
 -------
@@ -354,8 +371,16 @@ This should lead to decrease in the 'total' numbers in the *btrfs filesystem df*
 
 EXIT STATUS
 -----------
-*btrfs balance* returns a zero exit status if it succeeds. Non zero is
-returned in case of failure.
+Unless indicated otherwise below, all *btrfs balance* subcommands
+return a zero exit status if they succeed, and non zero in case of
+failure.
+
+The *pause*, *cancel*, and *resume* subcommands exit with a status of
+*2* if they fail because a balance operation was not running.
+
+The *status* subcommand exits with a status of *0* if a balance
+operation is not running, *1* if the command-line usage is incorrect
+or a balance operation is still running, and *2* on other errors.
 
 AVAILABILITY
 ------------

@@ -22,19 +22,19 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include "kerncompat.h"
-#include "ctree.h"
-#include "volumes.h"
-#include "disk-io.h"
-#include "print-tree.h"
-#include "transaction.h"
-#include "list.h"
-#include "utils.h"
-#include "help.h"
+#include "kernel-shared/ctree.h"
+#include "kernel-shared/volumes.h"
+#include "kernel-shared/disk-io.h"
+#include "kernel-shared/print-tree.h"
+#include "kernel-shared/transaction.h"
+#include "kernel-lib/list.h"
+#include "common/utils.h"
+#include "common/help.h"
 
 static void print_usage(void)
 {
 	printf("usage: btrfs-select-super -s number dev\n");
-	printf("\t-s super   copy of superbloc to overwrite the primary one (values: 1, 2)\n");
+	printf("\t-s super   copy of superblock to overwrite the primary one (values: 1, 2)\n");
 	exit(1);
 }
 
@@ -67,7 +67,7 @@ int main(int argc, char **argv)
 	}
 	set_argv0(argv);
 	if (check_argc_exact(argc - optind, 1))
-		print_usage();
+		return 1;
 
 	if (bytenr == 0) {
 		fprintf(stderr, "Please select the super copy with -s\n");
@@ -77,7 +77,8 @@ int main(int argc, char **argv)
 	radix_tree_init();
 
 	if((ret = check_mounted(argv[optind])) < 0) {
-		error("cannot check mount status: %s", strerror(-ret));
+		errno = -ret;
+		error("cannot check mount status: %m");
 		return ret;
 	} else if(ret) {
 		error("%s is currently mounted, aborting", argv[optind]);
